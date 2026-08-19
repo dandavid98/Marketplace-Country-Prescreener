@@ -21,6 +21,8 @@ from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from openpyxl import Workbook
 
+from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
+
 APP_TITLE = "Marketplace Country Prescreener"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -83,6 +85,7 @@ class ListingRecord:
     price_text: str = ""
     price_value: float | None = None
     description: str = ""
+    counterfeit_review_count: int = 0
     id: int | None = None
 
 
@@ -287,7 +290,6 @@ COUNTRY_HINTS: dict[str, list[re.Pattern[str]]] = {
         re.compile(r"(?:ships?|shipping|ship to|seller(?:\s+location)?|seller address|address|location|country of origin|based in)[^<>{}\n]{0,180}\bcn\b", re.I),
         re.compile(r"(?:ships?|shipping|ship to|seller(?:\s+location)?|seller address|address|location|country of origin|based in)[^<>{}\n]{0,220}\b(?:guangzhou|shenzhen|hangzhou|dongguan|foshan|yiwu|ningbo|suzhou|wenzhou|xiamen|qingdao|tianjin|beijing|shanghai|zhuhai|guangdong|zhejiang|jiangsu|shandong)\b", re.I),
         re.compile(r"(?:ships?|shipping|ship to|seller(?:\s+location)?|seller address|address|location|country of origin|based in)[^<>{}\n]{0,220}\b(?:GD|ZJ|JS|SH|BJ|CQ|SC|HN|HB|SD|FJ|JX|AH|GX|LN|TJ|HE|HL|JL)\s+\d{6}\b", re.I),
-        re.compile(r"\bfrom\s+china\b", re.I),
     ],
     "US": [
         re.compile(r"(?:ships?|shipping|ship to|seller(?:\s+location)?|seller address|address|location|based in)[^<>{}\n]{0,180}\b(?:united states|usa|us)\b", re.I),
@@ -306,7 +308,24 @@ def first_match(text: str, patterns: Iterable[re.Pattern[str]]) -> str:
     return "Unknown"
 
 
+def strip_review_text(html: str) -> str:
+    """Remove embedded customer review text/title JSON fields before signal scanning.
+
+    Walmart embeds full customer reviews directly in product/seller page HTML.
+    Reviews are personal opinions/guesses ("I suspect it came from China"), not
+    authoritative seller data, so they must not be able to trigger a country
+    signal match the way real "Seller Location: ..." text would.
+    """
+    html = re.sub(r'"reviewText"\s*:\s*"(?:[^"\\]|\\.)*"', '"reviewText":""', html)
+    html = re.sub(r'"reviewTitle"\s*:\s*"(?:[^"\\]|\\.)*"', '"reviewTitle":""', html)
+    # Walmart also renders the review body as plain visible text (not just JSON),
+    # consistently wrapped in this span structure. Strip that rendered copy too.
+    html = re.sub(r'(<span class="tl-m db-m"><b></b>).*?(</span>)', r'\1\2', html, flags=re.S)
+    return html
+
+
 def extract_signals(html: str, target_country: str) -> tuple[str, str, str, str]:
+    html = strip_review_text(html)
     text = normalize_space(strip_tags(html))
     china_evidence = first_match(text, COUNTRY_HINTS.get("China", []))
     us_evidence = first_match(text, COUNTRY_HINTS.get("US", []))
@@ -408,6 +427,7 @@ def init_db() -> None:
             'price_text': "alter table reviews add column price_text text not null default ''",
             'price_value': "alter table reviews add column price_value real",
             'description': "alter table reviews add column description text not null default ''",
+            'counterfeit_review_count': "alter table reviews add column counterfeit_review_count integer not null default 0",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -425,8 +445,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -450,6 +470,7 @@ def save_record(record: ListingRecord) -> int:
                 record.price_text,
                 record.price_value,
                 record.description,
+                record.counterfeit_review_count,
             ),
         )
         conn.commit()
@@ -523,7 +544,7 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None) -> str:
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
@@ -535,6 +556,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "max_price": max_price,
         "price_only": bool(price_only and max_price is not None),
         "match_description": match_description,
+        "counterfeit_min": counterfeit_min,
         "status": "running",
         "message": "Queued",
         "current": 0,
@@ -556,18 +578,18 @@ def append_log(job: dict, message: str) -> None:
         job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
     except BotChallengeDetected as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown"
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown", 0
     except HTTPError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown"
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown", 0
     except URLError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown"
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown", 0
     except Exception as exc:  # pragma: no cover
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown"
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown", 0
 
     image_url = extract_image_url(product_html)
     price_text = extract_price_text(product_html)
@@ -591,6 +613,10 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     scan_html = seller_html or product_html
     country_signal, seller_name, ship_from, evidence = extract_signals(scan_html, target_country)
     seller_id = extract_seller_id(seller_page_url)
+    if check_counterfeit and seller_page_url and seller_html:
+        counterfeit_review_count = count_counterfeit_reviews_across_pages(seller_page_url, seller_html, fetch_html)
+    else:
+        counterfeit_review_count = count_counterfeit_reviews_in_html(seller_html or product_html)
 
 
     if country_signal == "Unknown" and seller_html:
@@ -608,11 +634,11 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
             where = "title or description" if match_description else "title"
             evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
     status = "match" if (country_signal == target_country and keyword_ok) else "unknown"
-    return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text
+    return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False) -> tuple[ListingRecord, str]:
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text = scan_listing(keyword, listing_url, target_country, match_description)
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False) -> tuple[ListingRecord, str]:
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -635,6 +661,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         image_url=image_url,
         price_text=price_text,
         price_value=parse_price_value(price_text),
+        counterfeit_review_count=counterfeit_review_count,
     )
     return record, status
 
@@ -649,6 +676,7 @@ def run_job(job_id: str) -> None:
     max_price = job.get("max_price")
     price_only = bool(job.get("price_only") and max_price is not None)
     match_description = bool(job.get("match_description"))
+    counterfeit_min = job.get("counterfeit_min")
     worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
     if mode == "fast":
         worker_cap = max(worker_cap, 8)
@@ -716,7 +744,7 @@ def run_job(job_id: str) -> None:
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     futures = {
-                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description): listing_url
+                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None): listing_url
                         for listing_url in new_urls
                     }
                     for future in as_completed(futures):
@@ -740,6 +768,10 @@ def run_job(job_id: str) -> None:
                                 status = "unknown"
                             record.scan_status = status
                             record.review_state = "pending" if status == "match" else "not_queued"
+                        if status != "match" and keyword_ok and counterfeit_min is not None and record.counterfeit_review_count >= counterfeit_min:
+                            status = "match"
+                            record.scan_status = status
+                            record.review_state = "pending"
                         record.id = save_record(record)
                         with lock:
                             job["scanned"].append(asdict(record))
@@ -921,6 +953,7 @@ def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:   
     td a:hover {{ text-decoration: underline; }}
     .badge {{ display:inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }}
     .match {{ background: var(--ok); }} .unknown {{ background: var(--warn); }} .error {{ background: var(--bad); }}
+    .counterfeit-flag {{ background: #fecaca; border-color: #dc2626; color: #7f1d1d; font-weight: 700; }}
     .logbox {{ background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 10px; max-height: 240px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; }}
     .row-actions {{ display:flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }}
     .top-actions {{ display:flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }}
@@ -1024,6 +1057,15 @@ def home() -> HTMLResponse:
             </label>
           </div>
         </div>
+        <div class="grid" style="margin-top:12px; grid-template-columns: 1fr 1.5fr;">
+          <div>
+            <label for="counterfeit_min">Min. counterfeit-mentioning reviews (optional)</label>
+            <input id="counterfeit_min" name="counterfeit_min" type="number" min="0" step="1" placeholder="Off">
+          </div>
+          <div style="align-self:end;">
+            <span class="tiny">If set, a seller with at least this many reviews mentioning fake/counterfeit/knockoff language counts as a match too &mdash; in China, US, or Unknown, regardless of country signal.</span>
+          </div>
+        </div>
       </details>
       <div class="row-actions" style="margin-top:12px;">
         <button type="submit">Scan listings</button>
@@ -1036,6 +1078,7 @@ def home() -> HTMLResponse:
       If Walmart does not show a seller-country clue, the listing stays unflagged or unknown. If a robot check or captcha pops up, the scan logs it and moves on.
       Open <strong>Scan settings</strong> to set a max price. With "Match by price only" checked, listings under the price count as matches regardless of country; unchecked, price is an extra filter on top of the country match.
       By default the keyword must appear in the listing title; check "Also match against description" to count a listing as a match if the keyword shows up in EITHER the title or the description.
+      Set a <strong>counterfeit review threshold</strong> to also flag sellers whose reviews frequently mention fake/counterfeit/knockoff products &mdash; this works across China, US, and Unknown alike, as long as the keyword still matches.
     </p>
   </div>
 </main>
@@ -1053,6 +1096,7 @@ def scan(
     max_price: str = Query(default=""),
     price_only: bool = Query(default=False),
     match_description: bool = Query(default=False),
+    counterfeit_min: str = Query(default=""),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
@@ -1063,7 +1107,13 @@ def scan(
             parsed_max_price = max(0.0, float(max_price.strip()))
         except ValueError:
             parsed_max_price = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description)
+    parsed_counterfeit_min: int | None = None
+    if counterfeit_min.strip():
+        try:
+            parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
+        except ValueError:
+            parsed_counterfeit_min = None
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1105,16 +1155,20 @@ def job_page(job_id: str) -> HTMLResponse:
     </div>
     <div class="card" style="margin-top:16px; background:#fff;">
       <div><strong>Latest scan rows</strong> <span class="tiny">Most recent scan results, split by country signal</span></div>
+      <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-weight:600;">
+        <input id="matches-only-toggle" type="checkbox" checked style="width:auto;">
+        Show confirmed matches only <span class="tiny" style="font-weight:400;">(uncheck to see every scanned listing, matched or not)</span>
+      </label>
       <div class="tiny" id="latest-china-count" style="margin-top:8px;">China: 0</div>
       <div class="table-scroll">
         <table id="latest-china-table" data-resizable>
           <thead>
             <tr>
-              <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+              <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
             </tr>
           </thead>
           <tbody id="latest-china-body">
-            <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+            <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
           </tbody>
         </table>
       </div>
@@ -1124,11 +1178,11 @@ def job_page(job_id: str) -> HTMLResponse:
           <table id="latest-us-table" data-resizable>
             <thead>
               <tr>
-                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
               </tr>
             </thead>
             <tbody id="latest-us-body">
-              <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+              <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
             </tbody>
           </table>
         </div>
@@ -1139,11 +1193,11 @@ def job_page(job_id: str) -> HTMLResponse:
           <table id="latest-unknown-table" data-resizable>
             <thead>
               <tr>
-                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
               </tr>
             </thead>
             <tbody id="latest-unknown-body">
-              <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+              <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
             </tbody>
           </table>
         </div>
@@ -1316,6 +1370,10 @@ function wireGroupToggles(scope) {
     };
   });
 }
+const matchesOnlyToggleEl = document.getElementById('matches-only-toggle');
+if (matchesOnlyToggleEl) {
+  matchesOnlyToggleEl.addEventListener('change', refreshJob);
+}
 
 async function refreshJob() {
   const res = await fetch(`/api/job/${jobId}`);
@@ -1328,6 +1386,8 @@ async function refreshJob() {
   logs.innerHTML = data.logs.map(line => '<div>' + line.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>').join('');
   logs.scrollTop = logs.scrollHeight;
   const scanned = data.scanned || [];
+  const matchesOnlyToggle = document.getElementById('matches-only-toggle');
+  const matchesOnly = matchesOnlyToggle ? matchesOnlyToggle.checked : true;
   const chinaRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'China');
   const usRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'US');
   const unknownRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'Unknown');
@@ -1337,7 +1397,8 @@ async function refreshJob() {
   const latestChinaBody = document.getElementById('latest-china-body');
   if (latestChinaBody) {
     function renderLatestRows(rows) {
-      return rows.slice(-20).map(r => `
+      const visible = matchesOnly ? rows.filter(r => (r.scan_status || 'unknown') === 'match') : rows;
+      return visible.slice(-20).map(r => `
       <tr>
         <td>${escapeHtml(r.item_id || '')}</td>
         <td>${r.image_url ? '<a class="thumb-link" href="' + escapeHtml(r.image_url) + '" target="_blank" rel="noopener noreferrer" data-preview-src="' + escapeHtml(r.image_url) + '"><img class="thumb-image" src="' + escapeHtml(r.image_url) + '" alt="Listing image"></a>' : 'Unknown'}</td>
@@ -1346,12 +1407,16 @@ async function refreshJob() {
         <td><a href="${escapeHtml(r.listing_url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.listing_url || '')}</a></td>
         <td>${r.seller_page_url ? `<a href="${escapeHtml(r.seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.seller_id || 'Unknown')}</a>` : escapeHtml(r.seller_id || 'Unknown')}</td>
         <td>${escapeHtml(r.country_signal || 'Unknown')}</td>
+        <td>${r.counterfeit_review_count ? `<span class="badge counterfeit-flag">${escapeHtml(String(r.counterfeit_review_count))}</span>` : '0'}</td>
         <td><span class="badge ${escapeHtml(r.scan_status || 'unknown')}">${escapeHtml(r.scan_status || 'unknown')}</span></td>
-      </tr>`).join('') || '<tr><td colspan="8" class="muted">No scan rows yet.</td></tr>';
+      </tr>`).join('') || `<tr><td colspan="9" class="muted">${matchesOnly ? 'No confirmed matches yet.' : 'No scan rows yet.'}</td></tr>`;
     }
-    document.getElementById('latest-china-count').textContent = `China: ${chinaRows.length}`;
-    document.getElementById('latest-us-count').textContent = `US signal: ${usRows.length}`;
-    document.getElementById('latest-unknown-count').textContent = `Unknown signal: ${unknownRows.length}`;
+    const chinaVisible = matchesOnly ? chinaRows.filter(r => (r.scan_status || 'unknown') === 'match') : chinaRows;
+    const usVisible = matchesOnly ? usRows.filter(r => (r.scan_status || 'unknown') === 'match') : usRows;
+    const unknownVisible = matchesOnly ? unknownRows.filter(r => (r.scan_status || 'unknown') === 'match') : unknownRows;
+    document.getElementById('latest-china-count').textContent = `China: ${chinaVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
+    document.getElementById('latest-us-count').textContent = `US: ${usVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
+    document.getElementById('latest-unknown-count').textContent = `Unknown: ${unknownVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
     latestChinaBody.innerHTML = renderLatestRows(chinaRows);
     document.getElementById('latest-us-body').innerHTML = renderLatestRows(usRows);
     document.getElementById('latest-unknown-body').innerHTML = renderLatestRows(unknownRows);
