@@ -14,7 +14,7 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, urlencode, urlunparse
 from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Query
@@ -27,10 +27,12 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 DEFAULT_COUNTRY = "China"
+COUNTRY_OPTIONS = ["China", "US"]
 DEFAULT_LIMIT = 0
 SEARCH_TIMEOUT = 15
 MAX_PAGE_SAFETY = 250
 LISTING_WORKERS = 5
+KEYWORD_WORKERS = 3
 MAX_LISTING_WORKERS = 12
 DEFAULT_STOP_AFTER_FIRST_MATCH = False
 DEFAULT_MODE = "balanced"
@@ -54,7 +56,7 @@ BOT_CHALLENGE_PATTERNS = [
 
 
 app = FastAPI(title=APP_TITLE)
-lock = threading.Lock()
+lock = threading.RLock()
 JOBS: dict[str, dict] = {}
 
 
@@ -132,21 +134,21 @@ def extract_listing_urls(search_html: str) -> list[str]:
 
 
 def extract_next_search_url(search_html: str, current_url: str) -> str:
-    patterns = [
-        r'<a[^>]+rel=["\']next["\'][^>]+href=["\']([^"\']+)["\']',
-        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*rel=["\']next["\']',
-        r'<a[^>]+aria-label=["\'][^"\']*next[^"\']*["\'][^>]+href=["\']([^"\']+)["\']',
-        r'<a[^>]+href=["\']([^"\']+)["\'][^>]*aria-label=["\'][^"\']*next[^"\']*["\']',
-        r'href=["\']([^"\']*(?:[?&](?:page|offset)=\d+)[^"\']*)["\']',
-    ]
-    for pattern in patterns:
-        matches = re.findall(pattern, search_html, flags=re.I)
-        for raw in matches:
-            next_url = raw if raw.startswith("http") else urljoin(current_url, raw)
-            next_url = next_url.split("#")[0]
-            if "walmart.com/search" in next_url and next_url != current_url:
-                return next_url
-    return ""
+    max_page_match = re.search(r'"paginationV2":\{"maxPage":(\d+)', search_html)
+    max_page = int(max_page_match.group(1)) if max_page_match else None
+    parsed = urlparse(current_url)
+    params = parse_qs(parsed.query)
+    current_page = 1
+    if "page" in params and params["page"]:
+        try:
+            current_page = max(1, int(params["page"][0]))
+        except ValueError:
+            current_page = 1
+    if max_page is not None and current_page >= max_page:
+        return ""
+    params["page"] = [str(current_page + 1)]
+    next_query = urlencode(params, doseq=True)
+    return urlunparse(parsed._replace(query=next_query))
 
 
 def extract_seller_page_url(product_html: str, listing_url: str) -> str:
@@ -424,7 +426,7 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, stop_after_first_match: bool, mode: str) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str) -> str:
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
@@ -432,7 +434,6 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, stop
         "country": country,
         "limit": limit,
         "workers": workers,
-        "stop_after_first_match": stop_after_first_match,
         "mode": mode,
         "status": "running",
         "message": "Queued",
@@ -451,7 +452,8 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, stop
 
 
 def append_log(job: dict, message: str) -> None:
-    job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
+    with lock:
+        job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
 def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[str, str, str, str, str, str, str, str, str, str]:
@@ -527,23 +529,33 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
 def run_job(job_id: str) -> None:
     with lock:
         job = JOBS[job_id]
-    try:
-        keywords = job["keywords"]
-        country = job["country"]
-        page_limit = job["limit"]
-        mode = job.get("mode", DEFAULT_MODE)
-        worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
-        stop_after_first_match = bool(job.get("stop_after_first_match", False))
-        if mode == "fast":
-            worker_cap = max(worker_cap, 8)
-            stop_after_first_match = True
-        elif mode == "thorough":
-            worker_cap = min(worker_cap, 3)
-            stop_after_first_match = False
-        seen_urls: set[str] = set()
-        discovered = 0
+    keywords = job["keywords"]
+    country = job["country"]
+    page_limit = job["limit"]
+    mode = job.get("mode", DEFAULT_MODE)
+    worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
+    if mode == "fast":
+        worker_cap = max(worker_cap, 8)
+    elif mode == "thorough":
+        worker_cap = min(worker_cap, 3)
 
-        for i, keyword in enumerate(keywords, start=1):
+    seen_urls: set[str] = set()
+    discovered = 0
+
+    def process_keyword(position: int, keyword: str) -> None:
+        nonlocal discovered
+        with lock:
+            if job.get("stop_requested"):
+                return
+            job["message"] = f"Searching Walmart for {keyword!r} ({position}/{len(keywords)})"
+        append_log(job, job["message"])
+
+        current_search_url = walmart_search_url(keyword)
+        visited_search_pages: set[str] = set()
+        pages_crawled = 0
+        keyword_listing_count = 0
+
+        while current_search_url and current_search_url not in visited_search_pages:
             with lock:
                 if job.get("stop_requested"):
                     job["status"] = "stopped"
@@ -551,92 +563,89 @@ def run_job(job_id: str) -> None:
                     job["finished_at"] = utc_now()
                     append_log(job, "User requested stop. Ending scan early.")
                     return
-                job["current"] = i - 1
-                job["message"] = f"Searching Walmart for {keyword!r} ({i}/{len(keywords)})"
-            append_log(job, job["message"])
+            if page_limit > 0 and pages_crawled >= page_limit:
+                append_log(job, f"Page cap reached for {keyword!r}: {page_limit} page(s).")
+                break
+            if pages_crawled >= MAX_PAGE_SAFETY:
+                append_log(job, f"Safety cap reached for {keyword!r}: {MAX_PAGE_SAFETY} pages.")
+                break
 
-            current_search_url = walmart_search_url(keyword)
-            visited_search_pages: set[str] = set()
-            pages_crawled = 0
-            keyword_listing_count = 0
+            visited_search_pages.add(current_search_url)
+            pages_crawled += 1
+            append_log(job, f"Fetching search page {pages_crawled} for {keyword!r}: {current_search_url}")
 
-            while current_search_url and current_search_url not in visited_search_pages:
-                with lock:
-                    if job.get("stop_requested"):
-                        job["status"] = "stopped"
-                        job["message"] = "Scan stopped by user."
-                        job["finished_at"] = utc_now()
-                        append_log(job, "User requested stop. Ending scan early.")
-                        return
-                if stop_after_first_match and keyword_listing_count > 0 and any(r.get("keyword") == keyword and r.get("country_signal") == country for r in job["results"]):
-                    append_log(job, f"Stopping early for {keyword!r} after first match.")
-                    break
-                if page_limit > 0 and pages_crawled >= page_limit:
-                    append_log(job, f"Page cap reached for {keyword!r}: {page_limit} page(s).")
-                    break
-                if pages_crawled >= MAX_PAGE_SAFETY:
-                    append_log(job, f"Safety cap reached for {keyword!r}: {MAX_PAGE_SAFETY} pages.")
-                    break
+            try:
+                search_html = fetch_html(current_search_url)
+            except BotChallengeDetected as exc:
+                append_log(job, f"Search page blocked for {keyword!r} on page {pages_crawled}: {exc}")
+                break
+            except Exception as exc:
+                append_log(job, f"Search failed for {keyword!r} on page {pages_crawled}: {exc}")
+                break
 
-                visited_search_pages.add(current_search_url)
-                pages_crawled += 1
-                append_log(job, f"Fetching search page {pages_crawled} for {keyword!r}: {current_search_url}")
+            page_listing_urls = extract_listing_urls(search_html)
+            next_search_url = extract_next_search_url(search_html, current_search_url)
+            append_log(job, f"Page {pages_crawled} yielded {len(page_listing_urls)} candidate listing(s).")
 
-                try:
-                    search_html = fetch_html(current_search_url)
-                except BotChallengeDetected as exc:
-                    append_log(job, f"Search page blocked for {keyword!r} on page {pages_crawled}: {exc}")
-                    break
-                except Exception as exc:
-                    append_log(job, f"Search failed for {keyword!r} on page {pages_crawled}: {exc}")
-                    break
-
-                page_listing_urls = extract_listing_urls(search_html)
-                next_search_url = extract_next_search_url(search_html, current_search_url)
-                append_log(job, f"Page {pages_crawled} yielded {len(page_listing_urls)} candidate listing(s).")
-
-                new_urls = [u for u in page_listing_urls if u not in seen_urls]
-                for listing_url in new_urls:
-                    seen_urls.add(listing_url)
-                if not new_urls:
-                    append_log(job, f"No new listings found on page {pages_crawled} for {keyword!r}.")
-                else:
-                    worker_count = min(worker_cap, len(new_urls))
-                    append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
-                    with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                        futures = {
-                            pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url): listing_url
-                            for listing_url in new_urls
-                        }
-                        for future in as_completed(futures):
-                            listing_url = futures[future]
-                            try:
-                                record, status = future.result()
-                            except Exception as exc:
-                                append_log(job, f"Listing scan failed for {listing_url}: {exc}")
-                                continue
+            with lock:
+                new_urls: list[str] = []
+                for u in page_listing_urls:
+                    if u not in seen_urls:
+                        seen_urls.add(u)
+                        new_urls.append(u)
+            if not new_urls:
+                append_log(job, f"No new listings found on page {pages_crawled} for {keyword!r}.")
+            else:
+                worker_count = min(worker_cap, len(new_urls))
+                append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
+                with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    futures = {
+                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url): listing_url
+                        for listing_url in new_urls
+                    }
+                    for future in as_completed(futures):
+                        listing_url = futures[future]
+                        try:
+                            record, status = future.result()
+                        except Exception as exc:
+                            append_log(job, f"Listing scan failed for {listing_url}: {exc}")
+                            continue
+                        with lock:
                             discovered += 1
                             keyword_listing_count += 1
-                            with lock:
-                                job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
-                            record.job_id = job_id
-                            record.id = save_record(record)
-                            with lock:
-                                job["scanned"].append(asdict(record))
+                            job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
+                        record.job_id = job_id
+                        record.id = save_record(record)
+                        with lock:
+                            job["scanned"].append(asdict(record))
                             if status == "match":
-                                with lock:
-                                    job["results"].append(asdict(record))
-                                append_log(job, f"Match found: {record.title or listing_url}")
-                                if stop_after_first_match:
-                                    append_log(job, f"Fast mode stopping after first match for {keyword!r}.")
-                                    break
+                                job["results"].append(asdict(record))
+                        if status == "match":
+                            append_log(job, f"Match found: {record.title or listing_url}")
 
-                if not next_search_url or next_search_url in visited_search_pages:
-                    append_log(job, f"No more search pages for {keyword!r}.")
-                    break
-                current_search_url = next_search_url
+            if not next_search_url or next_search_url in visited_search_pages:
+                append_log(job, f"No more search pages for {keyword!r}.")
+                break
+            current_search_url = next_search_url
 
-            append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {len(job['results'])} match(es) so far.")
+        append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {len(job['results'])} match(es) so far.")
+        with lock:
+            job["current"] = min(job["total"], job.get("current", 0) + 1)
+
+    try:
+        keyword_worker_count = min(KEYWORD_WORKERS, len(keywords)) if keywords else 1
+        append_log(job, f"Running up to {keyword_worker_count} keyword search(es) in parallel.")
+        with ThreadPoolExecutor(max_workers=keyword_worker_count) as pool:
+            futures = {
+                pool.submit(process_keyword, i, keyword): keyword
+                for i, keyword in enumerate(keywords, start=1)
+            }
+            for future in as_completed(futures):
+                keyword = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    append_log(job, f"Keyword task failed for {keyword!r}: {exc}")
 
         with lock:
             if job.get("stop_requested"):
@@ -654,6 +663,7 @@ def run_job(job_id: str) -> None:
             job["message"] = f"Job failed: {exc}"
             job["finished_at"] = utc_now()
         append_log(job, job["message"])
+
 
 def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:
     return HTMLResponse(
@@ -701,6 +711,7 @@ def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:
     .toolbar {{ display:flex; gap: 8px; flex-wrap: wrap; align-items:end; }}
     .table-actions {{ display:flex; gap: 8px; flex-wrap: wrap; }}
     .group-row td {{ background: #f8fbff; }}
+    .keyword-row td {{ background: #fcfdff; }}
     .group-item {{ transition: opacity 0.15s ease; }}
     .group-toggle {{ padding: 6px 10px; font-size: 12px; margin-right: 10px; }}
     .tiny {{ font-size: 12px; color: var(--muted); }}
@@ -732,7 +743,9 @@ def home() -> HTMLResponse:
         </div>
         <div>
           <label for="country">Target country</label>
-          <input id="country" name="country" value="{html_escape(DEFAULT_COUNTRY)}">
+          <select id="country" name="country">
+            {''.join(f'<option value="{html_escape(option)}"{" selected" if option == DEFAULT_COUNTRY else ""}>{html_escape(option)}</option>' for option in COUNTRY_OPTIONS)}
+          </select>
         </div>
         <div>
           <label for="limit">Max search pages per keyword (0 = all)</label>
@@ -752,12 +765,7 @@ def home() -> HTMLResponse:
           <label for="workers">Listing workers</label>
           <input id="workers" name="workers" type="number" min="1" max="12" value="{LISTING_WORKERS}">
         </div>
-        <div style="align-self:end; padding-top:18px;">
-          <label style="display:flex; gap:8px; align-items:center; margin:0; color: var(--text);">
-            <input id="stop_after_first_match" name="stop_after_first_match" type="checkbox">
-            Stop after first match per keyword
-          </label>
-        </div>
+        <div style="align-self:end; padding-top:18px;"></div>
       </div>
       <div class="row-actions" style="margin-top:12px;">
         <button type="submit">Scan listings</button>
@@ -781,13 +789,12 @@ def scan(
     country: str = Query(default=DEFAULT_COUNTRY),
     limit: int = Query(default=DEFAULT_LIMIT, ge=0, le=500),
     workers: int = Query(default=LISTING_WORKERS, ge=1, le=MAX_LISTING_WORKERS),
-    stop_after_first_match: bool = Query(default=DEFAULT_STOP_AFTER_FIRST_MATCH),
     mode: str = Query(default=DEFAULT_MODE),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
         return home()
-    job_id = create_job(terms, country, limit, workers, stop_after_first_match, mode)
+    job_id = create_job(terms, country, limit, workers, mode)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -805,6 +812,9 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="job-id">Job: {html_escape(job_id)}</span>
       <span class="pill" id="job-status">Status: loading...</span>
       <span class="pill" id="job-message">Message: starting...</span>
+      <span class="pill" id="china-count">China matches: 0</span>
+      <span class="pill" id="us-count">US / explicit non-China matches: 0</span>
+      <span class="pill" id="unknown-count">Unknown matches: 0</span>
     </div>
     <div class="status">
       <div><strong>What the app is doing right now</strong></div>
@@ -905,27 +915,53 @@ function renderGroupedRows(rows, sectionKey) {
     const sellerA = (a.seller_name || 'Unknown').toLowerCase();
     const sellerB = (b.seller_name || 'Unknown').toLowerCase();
     if (sellerA !== sellerB) return sellerA.localeCompare(sellerB);
+    const keywordA = (a.keyword || '').toLowerCase();
+    const keywordB = (b.keyword || '').toLowerCase();
+    if (keywordA !== keywordB) return keywordA.localeCompare(keywordB);
     return (a.title || a.listing_url || '').localeCompare(b.title || b.listing_url || '');
   });
-  const groups = [];
+
+  const sellerGroups = [];
   for (const row of sorted) {
-    const key = row.seller_name || 'Unknown';
-    const last = groups[groups.length - 1];
-    if (!last || last.key !== key) groups.push({ key, rows: [row] });
-    else last.rows.push(row);
+    const sellerKey = row.seller_name || 'Unknown';
+    const lastSeller = sellerGroups[sellerGroups.length - 1];
+    if (!lastSeller || lastSeller.key !== sellerKey) {
+      sellerGroups.push({ key: sellerKey, rows: [row], keywords: [] });
+    } else {
+      lastSeller.rows.push(row);
+    }
   }
-  return groups.map(group => {
-    const groupKey = `${sectionKey}::${group.key}`;
-    const collapsed = collapsedGroups.has(groupKey);
-    return `
-    <tr class="group-row" data-group-key="${escapeHtml(groupKey)}">
+
+  return sellerGroups.map(sellerGroup => {
+    const sellerKey = `${sectionKey}::seller::${sellerGroup.key}`;
+    const sellerCollapsed = collapsedGroups.has(sellerKey);
+    const sellerId = sellerGroup.rows[0]?.seller_page_url
+      ? `<a href="${escapeHtml(sellerGroup.rows[0].seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sellerGroup.rows[0].seller_id || 'Unknown')}</a>`
+      : escapeHtml(sellerGroup.rows[0]?.seller_id || 'Unknown');
+
+    const keywordGroups = [];
+    for (const row of sellerGroup.rows) {
+      const keywordKey = row.keyword || 'Unknown';
+      const lastKeyword = keywordGroups[keywordGroups.length - 1];
+      if (!lastKeyword || lastKeyword.key !== keywordKey) {
+        keywordGroups.push({ key: keywordKey, rows: [row] });
+      } else {
+        lastKeyword.rows.push(row);
+      }
+    }
+
+    const keywordHtml = keywordGroups.map(keywordGroup => {
+      const keywordKey = `${sellerKey}::keyword::${keywordGroup.key}`;
+      const keywordCollapsed = sellerCollapsed || collapsedGroups.has(keywordKey);
+      return `
+    <tr class="keyword-row" data-group-key="${escapeHtml(keywordKey)}">
       <td colspan="8">
-        <button type="button" class="button secondary group-toggle" data-group-key="${escapeHtml(groupKey)}">${collapsed ? 'Expand' : 'Collapse'}</button>
-        <strong>${escapeHtml(group.key)}</strong> <span class="tiny">(${group.rows.length} result${group.rows.length === 1 ? '' : 's'}) Seller ID: ${group.rows[0].seller_page_url ? `<a href="${escapeHtml(group.rows[0].seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(group.rows[0].seller_id || 'Unknown')}</a>` : escapeHtml(group.rows[0].seller_id || 'Unknown')}</span>
+        <button type="button" class="button secondary group-toggle" data-group-key="${escapeHtml(keywordKey)}">${keywordCollapsed ? 'Expand' : 'Collapse'}</button>
+        <strong>${escapeHtml(keywordGroup.key)}</strong> <span class="tiny">(${keywordGroup.rows.length} result${keywordGroup.rows.length === 1 ? '' : 's'})</span>
       </td>
     </tr>
-    ${group.rows.map(r => `
-    <tr class="group-item" data-group-key="${escapeHtml(groupKey)}"${collapsed ? ' style="display:none;"' : ''}>
+    ${keywordGroup.rows.map(r => `
+    <tr class="group-item" data-group-key="${escapeHtml(sellerKey)} ${escapeHtml(keywordKey)}"${keywordCollapsed ? ' style="display:none;"' : ''}>
       <td>${escapeHtml(r.keyword)}</td>
       <td><a href="${escapeHtml(r.listing_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.listing_url)}</a></td>
       <td>${escapeHtml(r.seller_page_url || 'Unknown')}</td>
@@ -934,7 +970,17 @@ function renderGroupedRows(rows, sectionKey) {
       <td>${escapeHtml(r.country_signal || 'Unknown')}</td>
       <td><span class="badge ${escapeHtml(r.scan_status || 'unknown')}">${escapeHtml(r.scan_status || 'unknown')}</span></td>
       <td>${escapeHtml(r.evidence || '')}</td>
-    </tr>`).join('')}
+    </tr>`).join('')}`;
+    }).join('');
+
+    return `
+    <tr class="group-row" data-group-key="${escapeHtml(sellerKey)}">
+      <td colspan="8">
+        <button type="button" class="button secondary group-toggle" data-group-key="${escapeHtml(sellerKey)}">${sellerCollapsed ? 'Expand' : 'Collapse'}</button>
+        <strong>${escapeHtml(sellerGroup.key)}</strong> <span class="tiny">(${sellerGroup.rows.length} result${sellerGroup.rows.length === 1 ? '' : 's'}) Seller ID: ${sellerId}</span>
+      </td>
+    </tr>
+    ${keywordHtml}
   `;
   }).join('');
 }
@@ -970,6 +1016,9 @@ async function refreshJob() {
   const chinaRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'China');
   const usRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'US');
   const unknownRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'Unknown');
+  document.getElementById('china-count').textContent = `China matches: ${chinaRows.length}`;
+  document.getElementById('us-count').textContent = `US / explicit non-China matches: ${usRows.length}`;
+  document.getElementById('unknown-count').textContent = `Unknown matches: ${unknownRows.length}`;
   const filterText = (document.getElementById('filter-text')?.value || '').trim().toLowerCase();
   const filterStatus = document.getElementById('filter-status')?.value || 'all';
   const applyFilters = (rows) => rows.filter(r => {
@@ -995,11 +1044,6 @@ async function refreshJob() {
     chinaBody.innerHTML = filteredChina.length ? renderGroupedRows(filteredChina, 'china') : '<tr><td colspan="8" class="muted">No China results match the filters.</td></tr>';
     usBody.innerHTML = filteredUS.length ? renderGroupedRows(filteredUS, 'us') : '<tr><td colspan="8" class="muted">No US results match the filters.</td></tr>';
     unknownBody.innerHTML = filteredUnknown.length ? renderGroupedRows(filteredUnknown, 'unknown') : '<tr><td colspan="8" class="muted">No Unknown results match the filters.</td></tr>';
-  };
-  toggleChina.onclick = () => {
-    const hidden = chinaTable.style.display === 'none';
-    chinaTable.style.display = hidden ? '' : 'none';
-    toggleChina.textContent = hidden ? 'Hide Results' : 'Show Results';
   };
   toggleUS.onclick = () => {
     const hidden = usTable.style.display === 'none';
