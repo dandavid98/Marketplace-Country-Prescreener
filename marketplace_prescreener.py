@@ -78,6 +78,11 @@ class ListingRecord:
     scan_status: str
     review_state: str = "pending"
     created_at: str = ""
+    item_id: str = ""
+    image_url: str = ""
+    price_text: str = ""
+    price_value: float | None = None
+    description: str = ""
     id: int | None = None
 
 
@@ -191,6 +196,88 @@ def extract_seller_id(seller_page_url: str) -> str:
     if m:
         return m.group(1)
     return "Unknown"
+
+
+def extract_item_id(listing_url: str) -> str:
+    m = re.search(r"/ip/[^/]+/(\d+)", listing_url)
+    if m:
+        return m.group(1)
+    tail = listing_url.rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else "Unknown"
+
+
+def extract_image_url(product_html: str) -> str:
+    m = re.search(r'property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']', product_html, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r'content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', product_html, re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r'https://i5\.walmartimages\.com/[^"\'\\\s]+', product_html)
+    if m:
+        return m.group(0)
+    return ""
+
+
+def extract_description(product_html: str) -> str:
+    m = re.search(r'property=["\']og:description["\'][^>]*content=["\']([^"\']*)["\']', product_html, re.I)
+    if m:
+        return normalize_space(strip_tags(m.group(1)))
+    m = re.search(r'name=["\']description["\'][^>]*content=["\']([^"\']*)["\']', product_html, re.I)
+    if m:
+        return normalize_space(strip_tags(m.group(1)))
+    m = re.search(r'"shortDescription"\s*:\s*"((?:[^"\\]|\\.)*)"', product_html)
+    if m:
+        text = m.group(1).encode().decode("unicode_escape", errors="ignore")
+        return normalize_space(strip_tags(text))
+    return ""
+
+
+def extract_price_text(product_html: str) -> str:
+    m = re.search(r'"currentPrice"\s*:\s*\{[^}]*?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', product_html)
+    if m:
+        return f"${float(m.group(1)):.2f}"
+    m = re.search(r'itemprop=["\']price["\'][^>]*content=["\']([0-9]+(?:\.[0-9]+)?)["\']', product_html, re.I)
+    if m:
+        return f"${float(m.group(1)):.2f}"
+    m = re.search(r"\$\s?([0-9]{1,4}\.[0-9]{2})", product_html)
+    if m:
+        return f"${m.group(1)}"
+    return "Unknown"
+
+
+def parse_price_value(price_text: str) -> float | None:
+    m = re.search(r"([0-9]+(?:\.[0-9]+)?)", price_text or "")
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except ValueError:
+        return None
+
+
+def keyword_matches_text(keyword: str, text: str) -> bool:
+    if not text:
+        return False
+    text_lower = text.lower()
+    words = [w for w in re.findall(r"[a-z0-9]+", keyword.lower()) if len(w) > 1]
+    if not words:
+        return True
+    return all(w in text_lower for w in words)
+
+
+def keyword_matches_listing(keyword: str, title: str, description: str, match_description: bool) -> bool:
+    """Match a keyword against the title, optionally also checking the description.
+
+    With match_description off, only the title is checked (original behavior).
+    With it on, a listing counts as a match if EITHER the title OR the description
+    contains all the keyword's significant words.
+    """
+    if keyword_matches_text(keyword, title):
+        return True
+    if match_description and keyword_matches_text(keyword, description):
+        return True
+    return False
 
 
 COUNTRY_HINTS: dict[str, list[re.Pattern[str]]] = {
@@ -316,6 +403,11 @@ def init_db() -> None:
             'seller_page_url': "alter table reviews add column seller_page_url text not null default ''",
             'seller_id': "alter table reviews add column seller_id text not null default 'Unknown'",
             'evidence_source': "alter table reviews add column evidence_source text not null default ''",
+            'item_id': "alter table reviews add column item_id text not null default ''",
+            'image_url': "alter table reviews add column image_url text not null default ''",
+            'price_text': "alter table reviews add column price_text text not null default ''",
+            'price_value': "alter table reviews add column price_value real",
+            'description': "alter table reviews add column description text not null default ''",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -333,8 +425,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -353,6 +445,11 @@ def save_record(record: ListingRecord) -> int:
                 record.scan_status,
                 record.review_state,
                 record.created_at,
+                record.item_id,
+                record.image_url,
+                record.price_text,
+                record.price_value,
+                record.description,
             ),
         )
         conn.commit()
@@ -426,7 +523,7 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False) -> str:
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
@@ -435,6 +532,9 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "limit": limit,
         "workers": workers,
         "mode": mode,
+        "max_price": max_price,
+        "price_only": bool(price_only and max_price is not None),
+        "match_description": match_description,
         "status": "running",
         "message": "Queued",
         "current": 0,
@@ -456,19 +556,23 @@ def append_log(job: dict, message: str) -> None:
         job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[str, str, str, str, str, str, str, str, str, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str]:
+    item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
     except BotChallengeDetected as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", ""
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown"
     except HTTPError as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", ""
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown"
     except URLError as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", ""
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown"
     except Exception as exc:  # pragma: no cover
-        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", ""
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown"
 
+    image_url = extract_image_url(product_html)
+    price_text = extract_price_text(product_html)
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
+    description = extract_description(product_html)
     seller_page_url = extract_seller_page_url(product_html, listing_url)
     seller_page_title = ""
     seller_html = ""
@@ -497,14 +601,18 @@ def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[s
 
     if seller_name == "Unknown" and seller_page_title:
         seller_name = seller_page_title
+    keyword_ok = keyword_matches_listing(keyword, title, description, match_description)
     if country_signal == target_country:
         evidence = f"{evidence_source}: {evidence}"
-    status = "match" if country_signal == target_country else "unknown"
-    return country_signal, title, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title
+        if not keyword_ok:
+            where = "title or description" if match_description else "title"
+            evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
+    status = "match" if (country_signal == target_country and keyword_ok) else "unknown"
+    return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str) -> tuple[ListingRecord, str]:
-    country_signal, title, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title = scan_listing(keyword, listing_url, target_country)
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False) -> tuple[ListingRecord, str]:
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text = scan_listing(keyword, listing_url, target_country, match_description)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -512,6 +620,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         listing_url=listing_url,
         seller_page_url=seller_page_url,
         title=title or seller_page_title or listing_url,
+        description=description,
         seller_name=seller_name,
         seller_id=seller_id,
         ship_from_country=ship_from,
@@ -522,6 +631,10 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         scan_status=status,
         review_state="pending" if status == "match" else "not_queued",
         created_at=utc_now(),
+        item_id=item_id,
+        image_url=image_url,
+        price_text=price_text,
+        price_value=parse_price_value(price_text),
     )
     return record, status
 
@@ -533,6 +646,9 @@ def run_job(job_id: str) -> None:
     country = job["country"]
     page_limit = job["limit"]
     mode = job.get("mode", DEFAULT_MODE)
+    max_price = job.get("max_price")
+    price_only = bool(job.get("price_only") and max_price is not None)
+    match_description = bool(job.get("match_description"))
     worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
     if mode == "fast":
         worker_cap = max(worker_cap, 8)
@@ -600,7 +716,7 @@ def run_job(job_id: str) -> None:
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     futures = {
-                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url): listing_url
+                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description): listing_url
                         for listing_url in new_urls
                     }
                     for future in as_completed(futures):
@@ -615,6 +731,15 @@ def run_job(job_id: str) -> None:
                             keyword_listing_count += 1
                             job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
                         record.job_id = job_id
+                        keyword_ok = keyword_matches_listing(keyword, record.title, record.description, match_description)
+                        if status in ("match", "unknown") and max_price is not None:
+                            price_ok = record.price_value is not None and record.price_value <= max_price
+                            if price_only:
+                                status = "match" if (price_ok and keyword_ok) else "unknown"
+                            elif status == "match" and not price_ok:
+                                status = "unknown"
+                            record.scan_status = status
+                            record.review_state = "pending" if status == "match" else "not_queued"
                         record.id = save_record(record)
                         with lock:
                             job["scanned"].append(asdict(record))
@@ -665,8 +790,99 @@ def run_job(job_id: str) -> None:
         append_log(job, job["message"])
 
 
-def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:
-    return HTMLResponse(
+RESIZABLE_TABLE_SCRIPT = """
+function initResizableTables() {
+  var tables = document.querySelectorAll('table[data-resizable]');
+  for (var t = 0; t < tables.length; t++) {
+    var table = tables[t];
+    if (table.dataset.resizeReady === 'true') continue;
+    table.dataset.resizeReady = 'true';
+    table.style.tableLayout = 'fixed';
+    var headers = table.querySelectorAll('thead th');
+    for (var i = 0; i < headers.length; i++) {
+      (function (th) {
+        var handle = document.createElement('span');
+        handle.className = 'col-resize-handle';
+        if (getComputedStyle(th).position === 'static') {
+          th.style.position = 'relative';
+        }
+        th.appendChild(handle);
+        var startX = 0;
+        var startWidth = 0;
+        function onMove(e) {
+          var delta = e.clientX - startX;
+          var newWidth = Math.max(50, startWidth + delta);
+          th.style.width = newWidth + 'px';
+        }
+        function onUp() {
+          document.removeEventListener('pointermove', onMove);
+          document.removeEventListener('pointerup', onUp);
+          handle.classList.remove('active');
+        }
+        handle.addEventListener('pointerdown', function (e) {
+          e.preventDefault();
+          startX = e.clientX;
+          startWidth = th.getBoundingClientRect().width;
+          handle.classList.add('active');
+          document.addEventListener('pointermove', onMove);
+          document.addEventListener('pointerup', onUp);
+        });
+      })(headers[i]);
+    }
+  }
+}
+"""
+
+THUMB_PREVIEW_SCRIPT = """
+function initThumbPreview() {
+  var preview = document.getElementById('thumb-preview');
+  if (!preview) {
+    preview = document.createElement('div');
+    preview.id = 'thumb-preview';
+    preview.className = 'thumb-preview';
+    var img = document.createElement('img');
+    preview.appendChild(img);
+    document.body.appendChild(preview);
+  }
+  var previewImg = preview.querySelector('img');
+  function findThumbLink(target) {
+    while (target && target !== document.body) {
+      if (target.classList && target.classList.contains('thumb-link')) return target;
+      target = target.parentNode;
+    }
+    return null;
+  }
+  document.addEventListener('mouseover', function (e) {
+    var link = findThumbLink(e.target);
+    if (!link) return;
+    var src = link.getAttribute('data-preview-src');
+    if (!src) return;
+    previewImg.src = src;
+    preview.style.display = 'block';
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (preview.style.display !== 'block') return;
+    var x = e.clientX + 15;
+    var y = e.clientY + 15;
+    var maxX = window.innerWidth - 320;
+    var maxY = window.innerHeight - 320;
+    if (x > maxX) x = maxX;
+    if (y > maxY) y = maxY;
+    preview.style.left = x + 'px';
+    preview.style.top = y + 'px';
+  });
+  document.addEventListener('mouseout', function (e) {
+    var link = findThumbLink(e.target);
+    if (!link) return;
+    var toLink = findThumbLink(e.relatedTarget);
+    if (toLink) return;
+    preview.style.display = 'none';
+  });
+}
+"""
+
+
+def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:    return HTMLResponse(
         f"""<!doctype html>
 <html lang="en">
 <head>
@@ -715,6 +931,23 @@ def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:
     .group-item {{ transition: opacity 0.15s ease; }}
     .group-toggle {{ padding: 6px 10px; font-size: 12px; margin-right: 10px; }}
     .tiny {{ font-size: 12px; color: var(--muted); }}
+    .table-scroll {{ overflow-x: auto; overflow-y: auto; max-height: 430px; border: 1px solid var(--border); border-radius: 8px; }}
+    .table-scroll table {{ margin-top: 0; }}
+    .table-scroll table[data-resizable] thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; box-shadow: 0 1px 0 var(--border); }}
+    table[data-resizable] {{ table-layout: fixed; }}
+    table[data-resizable] th {{ position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 16px; }}
+    .col-resize-handle {{ position: absolute; top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }}
+    .col-resize-handle:hover, .col-resize-handle.active {{ background: rgba(31,78,120,.35); }}
+    .thumb-link img.thumb-image {{ width: 56px; height: 56px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 2px; cursor: zoom-in; }}
+    .thumb-preview {{ display: none; position: fixed; z-index: 999; width: 300px; height: 300px; background: #fff; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.2); padding: 8px; pointer-events: none; }}
+    .thumb-preview img {{ width: 100%; height: 100%; object-fit: contain; }}
+    details summary {{ cursor: pointer; font-weight: 600; }}
+    details summary::-webkit-details-marker {{ color: var(--accent); }}
+    .settings-accordion {{ }}
+    .settings-toggle {{ list-style: none; display: inline-block; width: auto; }}
+    .settings-toggle::-webkit-details-marker {{ display: none; }}
+    .settings-toggle::marker {{ content: ''; }}
+    .settings-toggle::before {{ content: ' '; }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
@@ -736,37 +969,62 @@ def home() -> HTMLResponse:
 <main>
   <div class="card">
     <form action="/scan" method="get">
-      <div class="grid">
+      <div class="grid" style="grid-template-columns: 1fr;">
         <div>
           <label for="keywords">Keywords</label>
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
         </div>
-        <div>
-          <label for="country">Target country</label>
-          <select id="country" name="country">
-            {''.join(f'<option value="{html_escape(option)}"{" selected" if option == DEFAULT_COUNTRY else ""}>{html_escape(option)}</option>' for option in COUNTRY_OPTIONS)}
-          </select>
-        </div>
-        <div>
-          <label for="limit">Max search pages per keyword (0 = all)</label>
-          <input id="limit" name="limit" type="number" min="0" max="500" value="{DEFAULT_LIMIT}">
-        </div>
       </div>
-      <div class="grid" style="margin-top:12px; grid-template-columns: .8fr .8fr 1.4fr;">
-        <div>
-          <label for="mode">Scan mode</label>
-          <select id="mode" name="mode">
-            <option value="fast">Fast</option>
-            <option value="balanced" selected>Balanced</option>
-            <option value="thorough">Thorough</option>
-          </select>
+      <details class="settings-accordion" style="margin-top:12px;">
+        <summary class="button secondary settings-toggle">Scan settings</summary>
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label for="country">Target country</label>
+            <select id="country" name="country">
+              {''.join(f'<option value="{html_escape(option)}"{" selected" if option == DEFAULT_COUNTRY else ""}>{html_escape(option)}</option>' for option in COUNTRY_OPTIONS)}
+            </select>
+          </div>
+          <div>
+            <label for="limit">Max search pages per keyword (0 = all)</label>
+            <input id="limit" name="limit" type="number" min="0" max="500" value="{DEFAULT_LIMIT}">
+          </div>
         </div>
-        <div>
-          <label for="workers">Listing workers</label>
-          <input id="workers" name="workers" type="number" min="1" max="12" value="{LISTING_WORKERS}">
+        <div class="grid" style="margin-top:12px; grid-template-columns: .8fr .8fr 1.4fr;">
+          <div>
+            <label for="mode">Scan mode</label>
+            <select id="mode" name="mode">
+              <option value="fast">Fast</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="thorough">Thorough</option>
+            </select>
+          </div>
+          <div>
+            <label for="workers">Listing workers</label>
+            <input id="workers" name="workers" type="number" min="1" max="12" value="{LISTING_WORKERS}">
+          </div>
+          <div style="align-self:end; padding-top:18px;"></div>
         </div>
-        <div style="align-self:end; padding-top:18px;"></div>
-      </div>
+        <div class="grid" style="margin-top:12px; grid-template-columns: .8fr 1.2fr;">
+          <div>
+            <label for="max_price">Max price ($, optional)</label>
+            <input id="max_price" name="max_price" type="number" min="0" step="0.01" placeholder="No limit">
+          </div>
+          <div style="align-self:end;">
+            <label style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
+              <input id="price_only" name="price_only" type="checkbox" value="true" style="width:auto;">
+              Match by price only (ignore country)
+            </label>
+          </div>
+        </div>
+        <div class="grid" style="margin-top:12px; grid-template-columns: 1fr;">
+          <div>
+            <label style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
+              <input id="match_description" name="match_description" type="checkbox" value="true" style="width:auto;">
+              Also match keyword against listing description (not just title)
+            </label>
+          </div>
+        </div>
+      </details>
       <div class="row-actions" style="margin-top:12px;">
         <button type="submit">Scan listings</button>
         <a class="button secondary" href="/queue">Review queue</a>
@@ -776,6 +1034,8 @@ def home() -> HTMLResponse:
     <p class="muted" style="margin-top:12px;">
       What it does: searches Walmart for each keyword, crawls through search result pages until there are no more pages (or your page cap is reached), opens each listing, and flags pages that explicitly mention the target country.
       If Walmart does not show a seller-country clue, the listing stays unflagged or unknown. If a robot check or captcha pops up, the scan logs it and moves on.
+      Open <strong>Scan settings</strong> to set a max price. With "Match by price only" checked, listings under the price count as matches regardless of country; unchecked, price is an extra filter on top of the country match.
+      By default the keyword must appear in the listing title; check "Also match against description" to count a listing as a match if the keyword shows up in EITHER the title or the description.
     </p>
   </div>
 </main>
@@ -790,11 +1050,20 @@ def scan(
     limit: int = Query(default=DEFAULT_LIMIT, ge=0, le=500),
     workers: int = Query(default=LISTING_WORKERS, ge=1, le=MAX_LISTING_WORKERS),
     mode: str = Query(default=DEFAULT_MODE),
+    max_price: str = Query(default=""),
+    price_only: bool = Query(default=False),
+    match_description: bool = Query(default=False),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
         return home()
-    job_id = create_job(terms, country, limit, workers, mode)
+    parsed_max_price: float | None = None
+    if max_price.strip():
+        try:
+            parsed_max_price = max(0.0, float(max_price.strip()))
+        except ValueError:
+            parsed_max_price = None
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -812,9 +1081,9 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="job-id">Job: {html_escape(job_id)}</span>
       <span class="pill" id="job-status">Status: loading...</span>
       <span class="pill" id="job-message">Message: starting...</span>
-      <span class="pill" id="china-count">China matches: 0</span>
-      <span class="pill" id="us-count">US / explicit non-China matches: 0</span>
-      <span class="pill" id="unknown-count">Unknown matches: 0</span>
+      <span class="pill" id="china-count">China signal: 0</span>
+      <span class="pill" id="us-count">US / explicit non-China signal: 0</span>
+      <span class="pill" id="unknown-count">Unknown signal: 0</span>
     </div>
     <div class="status">
       <div><strong>What the app is doing right now</strong></div>
@@ -833,6 +1102,52 @@ def job_page(job_id: str) -> HTMLResponse:
     <div class="card" style="margin:0; background:#f9fbff;">
       <div><strong>Live log</strong></div>
       <div id="job-logs" class="logbox"></div>
+    </div>
+    <div class="card" style="margin-top:16px; background:#fff;">
+      <div><strong>Latest scan rows</strong> <span class="tiny">Most recent scan results, split by country signal</span></div>
+      <div class="tiny" id="latest-china-count" style="margin-top:8px;">China: 0</div>
+      <div class="table-scroll">
+        <table id="latest-china-table" data-resizable>
+          <thead>
+            <tr>
+              <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="latest-china-body">
+            <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <details style="margin-top:14px;">
+        <summary class="tiny" id="latest-us-count">US signal: 0</summary>
+        <div class="table-scroll" style="margin-top:8px;">
+          <table id="latest-us-table" data-resizable>
+            <thead>
+              <tr>
+                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="latest-us-body">
+              <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
+      <details style="margin-top:10px;">
+        <summary class="tiny" id="latest-unknown-count">Unknown signal: 0</summary>
+        <div class="table-scroll" style="margin-top:8px;">
+          <table id="latest-unknown-table" data-resizable>
+            <thead>
+              <tr>
+                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="latest-unknown-body">
+              <tr><td colspan="8" class="muted">Waiting for listing data...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </details>
     </div>
     <div class="card" style="margin-top:16px; background:#fff;">
       <div class="toolbar">
@@ -860,10 +1175,10 @@ def job_page(job_id: str) -> HTMLResponse:
         </div>
       </div>
       <h3 style="margin: 12px 0 6px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
-        <span>China matches</span>
+        <span>China signal (all scanned, check the Status column for confirmed matches)</span>
         <button type="button" class="button secondary" id="toggle-china">Hide Results</button>
       </h3>
-      <table id="china-table">
+      <table id="china-table" data-resizable>
         <thead>
           <tr>
             <th>Keyword</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Status</th><th>Evidence</th>
@@ -874,10 +1189,10 @@ def job_page(job_id: str) -> HTMLResponse:
         </tbody>
       </table>
       <h3 style="margin: 18px 0 6px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
-        <span>US / explicit non-China matches</span>
+        <span>US / explicit non-China signal</span>
         <button type="button" class="button secondary" id="toggle-us">Show Results</button>
       </h3>
-      <table id="us-table" style="display:none;">
+      <table id="us-table" data-resizable style="display:none;">
         <thead>
           <tr>
             <th>Keyword</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Status</th><th>Evidence</th>
@@ -888,10 +1203,10 @@ def job_page(job_id: str) -> HTMLResponse:
         </tbody>
       </table>
       <h3 style="margin: 18px 0 6px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
-        <span>Unknown country matches</span>
+        <span>Unknown country signal</span>
         <button type="button" class="button secondary" id="toggle-unknown">Show Results</button>
       </h3>
-      <table id="unknown-table" style="display:none;">
+      <table id="unknown-table" data-resizable style="display:none;">
         <thead>
           <tr>
             <th>Keyword</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Status</th><th>Evidence</th>
@@ -935,9 +1250,9 @@ function renderGroupedRows(rows, sectionKey) {
   return sellerGroups.map(sellerGroup => {
     const sellerKey = `${sectionKey}::seller::${sellerGroup.key}`;
     const sellerCollapsed = collapsedGroups.has(sellerKey);
-    const sellerId = sellerGroup.rows[0]?.seller_page_url
+    const sellerId = sellerGroup.rows[0] && sellerGroup.rows[0].seller_page_url
       ? `<a href="${escapeHtml(sellerGroup.rows[0].seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(sellerGroup.rows[0].seller_id || 'Unknown')}</a>`
-      : escapeHtml(sellerGroup.rows[0]?.seller_id || 'Unknown');
+      : escapeHtml((sellerGroup.rows[0] && sellerGroup.rows[0].seller_id) || 'Unknown');
 
     const keywordGroups = [];
     for (const row of sellerGroup.rows) {
@@ -1016,11 +1331,35 @@ async function refreshJob() {
   const chinaRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'China');
   const usRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'US');
   const unknownRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'Unknown');
-  document.getElementById('china-count').textContent = `China matches: ${chinaRows.length}`;
-  document.getElementById('us-count').textContent = `US / explicit non-China matches: ${usRows.length}`;
-  document.getElementById('unknown-count').textContent = `Unknown matches: ${unknownRows.length}`;
-  const filterText = (document.getElementById('filter-text')?.value || '').trim().toLowerCase();
-  const filterStatus = document.getElementById('filter-status')?.value || 'all';
+  document.getElementById('china-count').textContent = `China signal: ${chinaRows.length}`;
+  document.getElementById('us-count').textContent = `US / explicit non-China signal: ${usRows.length}`;
+  document.getElementById('unknown-count').textContent = `Unknown signal: ${unknownRows.length}`;
+  const latestChinaBody = document.getElementById('latest-china-body');
+  if (latestChinaBody) {
+    function renderLatestRows(rows) {
+      return rows.slice(-20).map(r => `
+      <tr>
+        <td>${escapeHtml(r.item_id || '')}</td>
+        <td>${r.image_url ? '<a class="thumb-link" href="' + escapeHtml(r.image_url) + '" target="_blank" rel="noopener noreferrer" data-preview-src="' + escapeHtml(r.image_url) + '"><img class="thumb-image" src="' + escapeHtml(r.image_url) + '" alt="Listing image"></a>' : 'Unknown'}</td>
+        <td>${escapeHtml(r.price_text || (r.price_value != null ? '$' + Number(r.price_value).toFixed(2) : 'Unknown'))}</td>
+        <td>${escapeHtml(r.keyword || '')}</td>
+        <td><a href="${escapeHtml(r.listing_url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.listing_url || '')}</a></td>
+        <td>${r.seller_page_url ? `<a href="${escapeHtml(r.seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.seller_id || 'Unknown')}</a>` : escapeHtml(r.seller_id || 'Unknown')}</td>
+        <td>${escapeHtml(r.country_signal || 'Unknown')}</td>
+        <td><span class="badge ${escapeHtml(r.scan_status || 'unknown')}">${escapeHtml(r.scan_status || 'unknown')}</span></td>
+      </tr>`).join('') || '<tr><td colspan="8" class="muted">No scan rows yet.</td></tr>';
+    }
+    document.getElementById('latest-china-count').textContent = `China: ${chinaRows.length}`;
+    document.getElementById('latest-us-count').textContent = `US signal: ${usRows.length}`;
+    document.getElementById('latest-unknown-count').textContent = `Unknown signal: ${unknownRows.length}`;
+    latestChinaBody.innerHTML = renderLatestRows(chinaRows);
+    document.getElementById('latest-us-body').innerHTML = renderLatestRows(usRows);
+    document.getElementById('latest-unknown-body').innerHTML = renderLatestRows(unknownRows);
+  }
+  const filterTextEl = document.getElementById('filter-text');
+  const filterText = (filterTextEl ? filterTextEl.value : '').trim().toLowerCase();
+  const filterStatusEl = document.getElementById('filter-status');
+  const filterStatus = filterStatusEl ? filterStatusEl.value : 'all';
   const applyFilters = (rows) => rows.filter(r => {
     const haystack = [r.keyword, r.title, r.listing_url, r.seller_page_url, r.seller_name, r.ship_from_country, r.country_signal, r.evidence, r.scan_status].join(' ').toLowerCase();
     if (filterText && !haystack.includes(filterText)) return false;
@@ -1072,7 +1411,10 @@ async function refreshJob() {
   }
 }
 refreshJob();
+initResizableTables();
+initThumbPreview();
 """
+    extra_script = RESIZABLE_TABLE_SCRIPT + THUMB_PREVIEW_SCRIPT + extra_script
     extra_script = extra_script.replace('__JOB_ID__', json.dumps(job_id))
     return html_page(APP_TITLE, body, extra_script)
 
@@ -1156,7 +1498,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       <div class="tiny" style="width:100%; margin-bottom:6px;">Country view</div>
       {country_links}
     </div>
-    <table>
+    <table data-resizable>
       <thead>
         <tr>
           <th>ID</th><th>Keyword</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
@@ -1169,7 +1511,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
   </div>
 </main>
 """
-    return html_page(APP_TITLE, body)
+    return html_page(APP_TITLE, body, RESIZABLE_TABLE_SCRIPT + "initResizableTables();")
 
 
 @app.get("/review/{record_id}/{action}")
