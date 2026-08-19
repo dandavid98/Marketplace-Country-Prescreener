@@ -67,6 +67,7 @@ class ListingRecord:
     seller_page_url: str
     title: str
     seller_name: str
+    seller_id: str
     ship_from_country: str
     target_country: str
     country_signal: str
@@ -163,6 +164,31 @@ def extract_seller_page_url(product_html: str, listing_url: str) -> str:
                 seen.add(url)
                 candidates.append(url)
     return candidates[0] if candidates else ""
+
+
+def extract_seller_id(seller_page_url: str) -> str:
+    if not seller_page_url:
+        return "Unknown"
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(seller_page_url)
+    params = parse_qs(parsed.query)
+    for key in ("seller_id", "sellerId", "storeId", "merchantId", "id"):
+        values = params.get(key)
+        if values and values[0]:
+            return normalize_space(values[0])
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    for idx, seg in enumerate(segments):
+        if seg.lower() in {"seller", "store", "merchant"} and idx + 1 < len(segments):
+            candidate = segments[idx + 1]
+            if re.fullmatch(r"\d{3,}", candidate):
+                return candidate
+    for seg in reversed(segments):
+        if re.fullmatch(r"\d{3,}", seg):
+            return seg
+    m = re.search(r"(?:seller|store|merchant)[^\d]{0,20}(\d{3,})", seller_page_url, re.I)
+    if m:
+        return m.group(1)
+    return "Unknown"
 
 
 COUNTRY_HINTS: dict[str, list[re.Pattern[str]]] = {
@@ -271,6 +297,7 @@ def init_db() -> None:
                 seller_page_url text not null default '',
                 title text not null,
                 seller_name text not null,
+                seller_id text not null default "Unknown",
                 ship_from_country text not null,
                 target_country text not null,
                 country_signal text not null,
@@ -285,6 +312,7 @@ def init_db() -> None:
         cols = {row[1] for row in conn.execute("pragma table_info(reviews)").fetchall()}
         additions = {
             'seller_page_url': "alter table reviews add column seller_page_url text not null default ''",
+            'seller_id': "alter table reviews add column seller_id text not null default 'Unknown'",
             'evidence_source': "alter table reviews add column evidence_source text not null default ''",
         }
         for col, sql in additions.items():
@@ -301,10 +329,10 @@ def save_record(record: ListingRecord) -> int:
         cur = conn.execute(
             """
             insert into reviews (
-                job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name,
+                job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
                 scan_status, review_state, created_at
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -314,6 +342,7 @@ def save_record(record: ListingRecord) -> int:
                 record.seller_page_url,
                 record.title,
                 record.seller_name,
+                record.seller_id,
                 record.ship_from_country,
                 record.target_country,
                 record.country_signal,
@@ -359,7 +388,7 @@ def export_reviews_xlsx() -> Path:
     ws = wb.active
     ws.title = "Queue"
     headers = [
-        "ID", "Job ID", "Keyword", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name",
+        "ID", "Job ID", "Keyword", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
         "Ship From Country", "Target Country", "Country Signal", "Evidence Source", "Evidence", "Scan Status",
         "Review State", "Created At",
     ]
@@ -374,6 +403,7 @@ def export_reviews_xlsx() -> Path:
             row.get("seller_page_url", ""),
             row.get("title", ""),
             row.get("seller_name", ""),
+            row.get("seller_id", "Unknown"),
             row.get("ship_from_country", ""),
             row.get("target_country", ""),
             row.get("country_signal", ""),
@@ -424,17 +454,17 @@ def append_log(job: dict, message: str) -> None:
     job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[str, str, str, str, str, str, str, str, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[str, str, str, str, str, str, str, str, str, str]:
     try:
         product_html = fetch_html(listing_url)
     except BotChallengeDetected as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", str(exc), "blocked", "", ""
+        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", ""
     except HTTPError as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", ""
+        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", ""
     except URLError as exc:
-        return "Unknown", "", "", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", ""
+        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", ""
     except Exception as exc:  # pragma: no cover
-        return "Unknown", "", "", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", ""
+        return "Unknown", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", ""
 
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
     seller_page_url = extract_seller_page_url(product_html, listing_url)
@@ -454,6 +484,7 @@ def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[s
 
     scan_html = seller_html or product_html
     country_signal, seller_name, ship_from, evidence = extract_signals(scan_html, target_country)
+    seller_id = extract_seller_id(seller_page_url)
 
 
     if country_signal == "Unknown" and seller_html:
@@ -467,11 +498,11 @@ def scan_listing(keyword: str, listing_url: str, target_country: str) -> tuple[s
     if country_signal == target_country:
         evidence = f"{evidence_source}: {evidence}"
     status = "match" if country_signal == target_country else "unknown"
-    return country_signal, title, seller_page_url, seller_name, ship_from, evidence_source, evidence, status, seller_page_title
+    return country_signal, title, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title
 
 
 def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str) -> tuple[ListingRecord, str]:
-    country_signal, title, seller_page_url, seller_name, ship_from, evidence_source, evidence, status, seller_page_title = scan_listing(keyword, listing_url, target_country)
+    country_signal, title, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title = scan_listing(keyword, listing_url, target_country)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -480,6 +511,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         seller_page_url=seller_page_url,
         title=title or seller_page_title or listing_url,
         seller_name=seller_name,
+        seller_id=seller_id,
         ship_from_country=ship_from,
         target_country=target_country,
         country_signal=country_signal,
@@ -668,6 +700,9 @@ def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:
     .top-actions {{ display:flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }}
     .toolbar {{ display:flex; gap: 8px; flex-wrap: wrap; align-items:end; }}
     .table-actions {{ display:flex; gap: 8px; flex-wrap: wrap; }}
+    .group-row td {{ background: #f8fbff; }}
+    .group-item {{ transition: opacity 0.15s ease; }}
+    .group-toggle {{ padding: 6px 10px; font-size: 12px; margin-right: 10px; }}
     .tiny {{ font-size: 12px; color: var(--muted); }}
     @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} }}
   </style>
@@ -860,50 +895,74 @@ def job_page(job_id: str) -> HTMLResponse:
   </div>
 </main>
 """
-    extra_script = f"""
-const jobId = {json.dumps(job_id)};
-function escapeHtml(text) {{
+    extra_script = """
+const jobId = __JOB_ID__;
+function escapeHtml(text) {
   return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}}
-function renderGroupedRows(rows) {{
-  const sorted = [...rows].sort((a, b) => {{
+}
+function renderGroupedRows(rows, sectionKey) {
+  const sorted = [...rows].sort((a, b) => {
     const sellerA = (a.seller_name || 'Unknown').toLowerCase();
     const sellerB = (b.seller_name || 'Unknown').toLowerCase();
     if (sellerA !== sellerB) return sellerA.localeCompare(sellerB);
     return (a.title || a.listing_url || '').localeCompare(b.title || b.listing_url || '');
-  }});
+  });
   const groups = [];
-  for (const row of sorted) {{
+  for (const row of sorted) {
     const key = row.seller_name || 'Unknown';
     const last = groups[groups.length - 1];
-    if (!last || last.key !== key) groups.push({{ key, rows: [row] }});
+    if (!last || last.key !== key) groups.push({ key, rows: [row] });
     else last.rows.push(row);
-  }}
-  return groups.map(group => `
-    <tr class="group-row">
-      <td colspan="8"><strong>${{escapeHtml(group.key)}}</strong> <span class="tiny">(${{group.rows.length}} result${{group.rows.length === 1 ? '' : 's'}})</span></td>
+  }
+  return groups.map(group => {
+    const groupKey = `${sectionKey}::${group.key}`;
+    const collapsed = collapsedGroups.has(groupKey);
+    return `
+    <tr class="group-row" data-group-key="${escapeHtml(groupKey)}">
+      <td colspan="8">
+        <button type="button" class="button secondary group-toggle" data-group-key="${escapeHtml(groupKey)}">${collapsed ? 'Expand' : 'Collapse'}</button>
+        <strong>${escapeHtml(group.key)}</strong> <span class="tiny">(${group.rows.length} result${group.rows.length === 1 ? '' : 's'}) Seller ID: ${group.rows[0].seller_page_url ? `<a href="${escapeHtml(group.rows[0].seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(group.rows[0].seller_id || 'Unknown')}</a>` : escapeHtml(group.rows[0].seller_id || 'Unknown')}</span>
+      </td>
     </tr>
-    ${{group.rows.map(r => `
-    <tr>
-      <td>${{escapeHtml(r.keyword)}}</td>
-      <td><a href="${{escapeHtml(r.listing_url)}}" target="_blank" rel="noopener noreferrer">${{escapeHtml(r.title || r.listing_url)}}</a></td>
-      <td>${{escapeHtml(r.seller_page_url || 'Unknown')}}</td>
-      <td>${{escapeHtml(r.seller_name || 'Unknown')}}</td>
-      <td>${{escapeHtml(r.ship_from_country || 'Unknown')}}</td>
-      <td>${{escapeHtml(r.country_signal || 'Unknown')}}</td>
-      <td><span class="badge ${{escapeHtml(r.scan_status || 'unknown')}}">${{escapeHtml(r.scan_status || 'unknown')}}</span></td>
-      <td>${{escapeHtml(r.evidence || '')}}</td>
-    </tr>`).join('')}}
-  `).join('');
-}}
+    ${group.rows.map(r => `
+    <tr class="group-item" data-group-key="${escapeHtml(groupKey)}"${collapsed ? ' style="display:none;"' : ''}>
+      <td>${escapeHtml(r.keyword)}</td>
+      <td><a href="${escapeHtml(r.listing_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.listing_url)}</a></td>
+      <td>${escapeHtml(r.seller_page_url || 'Unknown')}</td>
+      <td>${escapeHtml(r.seller_name || 'Unknown')}</td>
+      <td>${escapeHtml(r.ship_from_country || 'Unknown')}</td>
+      <td>${escapeHtml(r.country_signal || 'Unknown')}</td>
+      <td><span class="badge ${escapeHtml(r.scan_status || 'unknown')}">${escapeHtml(r.scan_status || 'unknown')}</span></td>
+      <td>${escapeHtml(r.evidence || '')}</td>
+    </tr>`).join('')}
+  `;
+  }).join('');
+}
 
-async function refreshJob() {{
-  const res = await fetch(`/api/job/${{jobId}}`);
+const collapsedGroups = new Set(JSON.parse(localStorage.getItem('collapsedGroups') || '[]'));
+function persistCollapsedGroups() {
+  localStorage.setItem('collapsedGroups', JSON.stringify([...collapsedGroups]));
+}
+function wireGroupToggles(scope) {
+  scope.querySelectorAll('.group-toggle').forEach(btn => {
+    btn.onclick = () => {
+      const key = btn.dataset.groupKey;
+      if (!key) return;
+      if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+      else collapsedGroups.add(key);
+      persistCollapsedGroups();
+      refreshJob();
+    };
+  });
+}
+
+async function refreshJob() {
+  const res = await fetch(`/api/job/${jobId}`);
   const data = await res.json();
   document.getElementById('job-status').textContent = 'Status: ' + data.status;
   document.getElementById('job-message').textContent = 'Message: ' + data.message;
   document.getElementById('job-current').textContent = data.status === 'stopping' ? 'Stopping scan...' : data.message;
-  document.getElementById('job-stats').textContent = `Progress: ${{data.current}} / ${{data.total}} | Scanned: ${{(data.scanned || []).length}} | Matches queued: ${{data.results.length}}`;
+  document.getElementById('job-stats').textContent = `Progress: ${data.current} / ${data.total} | Scanned: ${(data.scanned || []).length} | Matches queued: ${data.results.length}`;
   const logs = document.getElementById('job-logs');
   logs.innerHTML = data.logs.map(line => '<div>' + line.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>').join('');
   logs.scrollTop = logs.scrollHeight;
@@ -913,12 +972,12 @@ async function refreshJob() {{
   const unknownRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'Unknown');
   const filterText = (document.getElementById('filter-text')?.value || '').trim().toLowerCase();
   const filterStatus = document.getElementById('filter-status')?.value || 'all';
-  const applyFilters = (rows) => rows.filter(r => {{
+  const applyFilters = (rows) => rows.filter(r => {
     const haystack = [r.keyword, r.title, r.listing_url, r.seller_page_url, r.seller_name, r.ship_from_country, r.country_signal, r.evidence, r.scan_status].join(' ').toLowerCase();
     if (filterText && !haystack.includes(filterText)) return false;
     if (filterStatus !== 'all' && (r.scan_status || 'unknown') !== filterStatus) return false;
     return true;
-  }});
+  });
   const chinaTable = document.getElementById('china-table');
   const usTable = document.getElementById('us-table');
   const unknownTable = document.getElementById('unknown-table');
@@ -929,44 +988,48 @@ async function refreshJob() {{
   const toggleUS = document.getElementById('toggle-us');
   const toggleUnknown = document.getElementById('toggle-unknown');
   const clearFilters = document.getElementById('clear-filters');
-  const rerender = () => {{
+  const rerender = () => {
     const filteredChina = applyFilters(chinaRows);
     const filteredUS = applyFilters(usRows);
     const filteredUnknown = applyFilters(unknownRows);
-    chinaBody.innerHTML = filteredChina.length ? renderGroupedRows(filteredChina) : '<tr><td colspan="8" class="muted">No China results match the filters.</td></tr>';
-    usBody.innerHTML = filteredUS.length ? renderGroupedRows(filteredUS) : '<tr><td colspan="8" class="muted">No US results match the filters.</td></tr>';
-    unknownBody.innerHTML = filteredUnknown.length ? renderGroupedRows(filteredUnknown) : '<tr><td colspan="8" class="muted">No Unknown results match the filters.</td></tr>';
-  }};
-  toggleChina.onclick = () => {{
+    chinaBody.innerHTML = filteredChina.length ? renderGroupedRows(filteredChina, 'china') : '<tr><td colspan="8" class="muted">No China results match the filters.</td></tr>';
+    usBody.innerHTML = filteredUS.length ? renderGroupedRows(filteredUS, 'us') : '<tr><td colspan="8" class="muted">No US results match the filters.</td></tr>';
+    unknownBody.innerHTML = filteredUnknown.length ? renderGroupedRows(filteredUnknown, 'unknown') : '<tr><td colspan="8" class="muted">No Unknown results match the filters.</td></tr>';
+  };
+  toggleChina.onclick = () => {
     const hidden = chinaTable.style.display === 'none';
     chinaTable.style.display = hidden ? '' : 'none';
     toggleChina.textContent = hidden ? 'Hide Results' : 'Show Results';
-  }};
-  toggleUS.onclick = () => {{
+  };
+  toggleUS.onclick = () => {
     const hidden = usTable.style.display === 'none';
     usTable.style.display = hidden ? '' : 'none';
     toggleUS.textContent = hidden ? 'Hide Results' : 'Show Results';
-  }};
-  toggleUnknown.onclick = () => {{
+  };
+  toggleUnknown.onclick = () => {
     const hidden = unknownTable.style.display === 'none';
     unknownTable.style.display = hidden ? '' : 'none';
     toggleUnknown.textContent = hidden ? 'Hide Results' : 'Show Results';
-  }};
-  clearFilters.onclick = () => {{
+  };
+  clearFilters.onclick = () => {
     document.getElementById('filter-text').value = '';
     document.getElementById('filter-status').value = 'all';
     rerender();
-  }};
+  };
   document.getElementById('filter-text').addEventListener('input', rerender);
   document.getElementById('filter-status').addEventListener('change', rerender);
   rerender();
+  wireGroupToggles(chinaBody);
+  wireGroupToggles(usBody);
+  wireGroupToggles(unknownBody);
   const terminalStatuses = new Set(['done', 'stopped', 'error', 'stopping']);
-  if (!terminalStatuses.has(data.status)) {{
+  if (!terminalStatuses.has(data.status)) {
     setTimeout(refreshJob, 1200);
-  }}
-}}
+  }
+}
 refreshJob();
 """
+    extra_script = extra_script.replace('__JOB_ID__', json.dumps(job_id))
     return html_page(APP_TITLE, body, extra_script)
 
 
