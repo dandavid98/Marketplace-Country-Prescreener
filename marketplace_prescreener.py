@@ -31,6 +31,57 @@ USER_AGENT = (
 DEFAULT_COUNTRY = "China"
 COUNTRY_OPTIONS = ["China", "US"]
 DEFAULT_LIMIT = 0
+
+
+@dataclass(frozen=True)
+class Market:
+    """A Walmart-banner storefront the scanner can point at.
+
+    `domain` is the storefront host, `locale_prefix` is the path segment
+    Walmart puts before `/ip/` and `/search` on that storefront (empty for
+    walmart.com, "en" for walmart.ca, etc.), and `currency_suffix` is a
+    cosmetic label appended to parsed prices so a $19.99 CAD listing isn't
+    mistaken for USD.
+    """
+
+    code: str
+    label: str
+    domain: str
+    locale_prefix: str = ""
+    currency_suffix: str = ""
+
+    @property
+    def root_domain(self) -> str:
+        return self.domain[4:] if self.domain.startswith("www.") else self.domain
+
+    @property
+    def path_prefix(self) -> str:
+        return f"/{self.locale_prefix}" if self.locale_prefix else ""
+
+    @property
+    def base_url(self) -> str:
+        return f"https://{self.domain}"
+
+
+# NOTE on MX/CL domains: verified live via curl during setup (2026-08-25) for
+# US and CA only. This sandbox's DNS resolver blocks .mx/.cl TLD lookups
+# entirely (also blocked amazon.com.mx, a domain that definitely exists), so
+# walmart.com.mx / lider.cl could not be confirmed from here. Both are the
+# correct storefronts per public knowledge, but test them for real once this
+# is running on a normal network before trusting MX/CL results.
+MARKETS: dict[str, Market] = {
+    "US": Market("US", "United States \u2014 walmart.com", "www.walmart.com"),
+    "CA": Market("CA", "Canada \u2014 walmart.ca", "www.walmart.ca", locale_prefix="en", currency_suffix=" CAD"),
+    "MX": Market("MX", "Mexico \u2014 walmart.com.mx (verify DNS resolves before use)", "www.walmart.com.mx", currency_suffix=" MXN"),
+    "CL": Market("CL", "Chile \u2014 lider.cl (verify DNS resolves before use)", "www.lider.cl", currency_suffix=" CLP"),
+}
+DEFAULT_MARKET = "US"
+
+
+def get_market(code: str | None) -> Market:
+    return MARKETS.get((code or "").upper(), MARKETS[DEFAULT_MARKET])
+
+
 SEARCH_TIMEOUT = 15
 MAX_PAGE_SAFETY = 250
 LISTING_WORKERS = 5
@@ -86,6 +137,7 @@ class ListingRecord:
     price_value: float | None = None
     description: str = ""
     counterfeit_review_count: int = 0
+    market: str = DEFAULT_MARKET
     id: int | None = None
 
 
@@ -93,8 +145,9 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def walmart_search_url(keyword: str) -> str:
-    return f"https://www.walmart.com/search?q={quote_plus(keyword)}"
+def walmart_search_url(keyword: str, market: Market | None = None) -> str:
+    market = market or MARKETS[DEFAULT_MARKET]
+    return f"{market.base_url}{market.path_prefix}/search?q={quote_plus(keyword)}"
 
 
 def is_bot_challenge(html: str) -> bool:
@@ -127,13 +180,17 @@ def page_title(html: str, fallback: str = "") -> str:
     return normalize_space(strip_tags(m.group(1))) if m else fallback
 
 
-def extract_listing_urls(search_html: str) -> list[str]:
-    patterns = [r"https://www\.walmart\.com/ip/[^\"'<>\s]+", r"/ip/[^\"'<>\s]+"]
+def extract_listing_urls(search_html: str, market: Market | None = None) -> list[str]:
+    market = market or MARKETS[DEFAULT_MARKET]
+    prefix = re.escape(market.path_prefix)
+    domain = re.escape(market.domain)
+    relative_pattern = rf"{prefix}/ip/[^\"'<>\s]+" if prefix else r"/ip/[^\"'<>\s]+"
+    patterns = [rf"https://{domain}{prefix}/ip/[^\"'<>\s]+", relative_pattern]
     urls: list[str] = []
     seen: set[str] = set()
     for pattern in patterns:
         for raw in re.findall(pattern, search_html):
-            url = raw if raw.startswith("http") else urljoin("https://www.walmart.com", raw)
+            url = raw if raw.startswith("http") else urljoin(market.base_url, raw)
             url = url.split("?")[0]
             if url not in seen:
                 seen.add(url)
@@ -160,17 +217,26 @@ def extract_next_search_url(search_html: str, current_url: str) -> str:
 
 
 def extract_seller_page_url(product_html: str, listing_url: str) -> str:
+    """Find the seller/store link on a product page.
+
+    Domain-checked against `listing_url`'s own host (not a hardcoded
+    "walmart.com") so this works for any configured Market -- walmart.ca,
+    walmart.com.mx, lider.cl, etc. -- without needing the Market object
+    threaded in here too.
+    """
     patterns = [
         r'href=["\']([^"\']*(?:/seller/|seller\?|seller/|/store/|store/)[^"\']*)["\']',
         r'href=["\']([^"\']*seller[^"\']*)["\']',
     ]
+    listing_domain = urlparse(listing_url).netloc
+    domain_root = listing_domain[4:] if listing_domain.startswith("www.") else listing_domain
     candidates: list[str] = []
     seen: set[str] = set()
     for pattern in patterns:
         for raw in re.findall(pattern, product_html, flags=re.I):
             url = raw if raw.startswith("http") else urljoin(listing_url, raw)
             url = url.split("#")[0].split("?")[0]
-            if url not in seen and "walmart.com" in url and "/ip/" not in url and "/search" not in url:
+            if url not in seen and domain_root and domain_root in url and "/ip/" not in url and "/search" not in url:
                 seen.add(url)
                 candidates.append(url)
     return candidates[0] if candidates else ""
@@ -201,6 +267,17 @@ def extract_seller_id(seller_page_url: str) -> str:
     return "Unknown"
 
 
+def extract_embedded_seller_id(product_html: str) -> str:
+    """Fallback seller-id lookup for storefronts that don't render a clickable
+    seller-page link (confirmed on walmart.ca product pages, which show a
+    plain "Sold by X" text with no href, unlike walmart.com's linked seller
+    storefronts). Walmart's product page still embeds the raw sellerId in a
+    JSON payload regardless of storefront, so this pulls it from there.
+    """
+    m = re.search(r'"sellerId"\s*:\s*"([^"]+)"', product_html)
+    return normalize_space(m.group(1)) if m else "Unknown"
+
+
 def extract_item_id(listing_url: str) -> str:
     m = re.search(r"/ip/[^/]+/(\d+)", listing_url)
     if m:
@@ -216,7 +293,7 @@ def extract_image_url(product_html: str) -> str:
     m = re.search(r'content=["\']([^"\']+)["\'][^>]*property=["\']og:image["\']', product_html, re.I)
     if m:
         return m.group(1)
-    m = re.search(r'https://i5\.walmartimages\.com/[^"\'\\\s]+', product_html)
+    m = re.search(r'https://i\d*\.walmartimages\.[a-z.]+/[^"\'\\\s]+', product_html)
     if m:
         return m.group(0)
     return ""
@@ -428,6 +505,7 @@ def init_db() -> None:
             'price_value': "alter table reviews add column price_value real",
             'description': "alter table reviews add column description text not null default ''",
             'counterfeit_review_count': "alter table reviews add column counterfeit_review_count integer not null default 0",
+            'market': f"alter table reviews add column market text not null default '{DEFAULT_MARKET}'",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -445,8 +523,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -471,6 +549,7 @@ def save_record(record: ListingRecord) -> int:
                 record.price_value,
                 record.description,
                 record.counterfeit_review_count,
+                record.market,
             ),
         )
         conn.commit()
@@ -508,7 +587,7 @@ def export_reviews_xlsx() -> Path:
     ws = wb.active
     ws.title = "Queue"
     headers = [
-        "ID", "Job ID", "Keyword", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
+        "ID", "Job ID", "Keyword", "Market", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
         "Ship From Country", "Target Country", "Country Signal", "Evidence Source", "Evidence", "Scan Status",
         "Review State", "Created At",
     ]
@@ -518,6 +597,7 @@ def export_reviews_xlsx() -> Path:
             row.get("id", ""),
             row.get("job_id", ""),
             row.get("keyword", ""),
+            row.get("market", DEFAULT_MARKET),
             row.get("search_url", ""),
             row.get("listing_url", ""),
             row.get("seller_page_url", ""),
@@ -544,12 +624,14 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET) -> str:
     job_id = uuid.uuid4().hex[:10]
+    market_obj = get_market(market)
     job = {
         "id": job_id,
         "keywords": keywords,
         "country": country,
+        "market": market_obj.code,
         "limit": limit,
         "workers": workers,
         "mode": mode,
@@ -561,7 +643,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "message": "Queued",
         "current": 0,
         "total": max(len(keywords), 1),
-        "logs": [f"Queued scan for {len(keywords)} keyword(s) targeting {country}."] ,
+        "logs": [f"Queued scan for {len(keywords)} keyword(s) targeting {country} on {market_obj.label}."] ,
         "results": [],
         "scanned": [],
         "stop_requested": False,
@@ -578,7 +660,7 @@ def append_log(job: dict, message: str) -> None:
         job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
@@ -593,6 +675,8 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
 
     image_url = extract_image_url(product_html)
     price_text = extract_price_text(product_html)
+    if price_text != "Unknown" and market and market.currency_suffix:
+        price_text = f"{price_text}{market.currency_suffix}"
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
     description = extract_description(product_html)
     seller_page_url = extract_seller_page_url(product_html, listing_url)
@@ -613,6 +697,8 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     scan_html = seller_html or product_html
     country_signal, seller_name, ship_from, evidence = extract_signals(scan_html, target_country)
     seller_id = extract_seller_id(seller_page_url)
+    if seller_id == "Unknown":
+        seller_id = extract_embedded_seller_id(product_html)
     if check_counterfeit and seller_page_url and seller_html:
         counterfeit_review_count = count_counterfeit_reviews_across_pages(seller_page_url, seller_html, fetch_html)
     else:
@@ -637,8 +723,9 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False) -> tuple[ListingRecord, str]:
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit)
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None) -> tuple[ListingRecord, str]:
+    market = market or MARKETS[DEFAULT_MARKET]
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -662,6 +749,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         price_text=price_text,
         price_value=parse_price_value(price_text),
         counterfeit_review_count=counterfeit_review_count,
+        market=market.code,
     )
     return record, status
 
@@ -671,6 +759,7 @@ def run_job(job_id: str) -> None:
         job = JOBS[job_id]
     keywords = job["keywords"]
     country = job["country"]
+    market = get_market(job.get("market"))
     page_limit = job["limit"]
     mode = job.get("mode", DEFAULT_MODE)
     max_price = job.get("max_price")
@@ -691,10 +780,10 @@ def run_job(job_id: str) -> None:
         with lock:
             if job.get("stop_requested"):
                 return
-            job["message"] = f"Searching Walmart for {keyword!r} ({position}/{len(keywords)})"
+            job["message"] = f"Searching {market.label} for {keyword!r} ({position}/{len(keywords)})"
         append_log(job, job["message"])
 
-        current_search_url = walmart_search_url(keyword)
+        current_search_url = walmart_search_url(keyword, market)
         visited_search_pages: set[str] = set()
         pages_crawled = 0
         keyword_listing_count = 0
@@ -727,7 +816,7 @@ def run_job(job_id: str) -> None:
                 append_log(job, f"Search failed for {keyword!r} on page {pages_crawled}: {exc}")
                 break
 
-            page_listing_urls = extract_listing_urls(search_html)
+            page_listing_urls = extract_listing_urls(search_html, market)
             next_search_url = extract_next_search_url(search_html, current_search_url)
             append_log(job, f"Page {pages_crawled} yielded {len(page_listing_urls)} candidate listing(s).")
 
@@ -744,7 +833,7 @@ def run_job(job_id: str) -> None:
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     futures = {
-                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None): listing_url
+                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market): listing_url
                         for listing_url in new_urls
                     }
                     for future in as_completed(futures):
@@ -1008,6 +1097,14 @@ def home() -> HTMLResponse:
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
         </div>
       </div>
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label for="market">Market (which Walmart storefront to scan)</label>
+            <select id="market" name="market">
+              {''.join(f'<option value="{html_escape(m.code)}"{" selected" if m.code == DEFAULT_MARKET else ""}>{html_escape(m.label)}</option>' for m in MARKETS.values())}
+            </select>
+          </div>
+        </div>
       <details class="settings-accordion" style="margin-top:12px;">
         <summary class="button secondary settings-toggle">Scan settings</summary>
         <div class="grid" style="margin-top:12px;">
@@ -1074,7 +1171,8 @@ def home() -> HTMLResponse:
       </div>
     </form>
     <p class="muted" style="margin-top:12px;">
-      What it does: searches Walmart for each keyword, crawls through search result pages until there are no more pages (or your page cap is reached), opens each listing, and flags pages that explicitly mention the target country.
+      What it does: searches the selected <strong>Market</strong> storefront for each keyword, crawls through search result pages until there are no more pages (or your page cap is reached), opens each listing, and flags pages that explicitly mention the target country.
+      Pick <strong>Market</strong> to point the scan at walmart.com, walmart.ca, walmart.com.mx, or lider.cl &mdash; everything else (target country, price, keyword matching) behaves the same regardless of market.
       If Walmart does not show a seller-country clue, the listing stays unflagged or unknown. If a robot check or captcha pops up, the scan logs it and moves on.
       Open <strong>Scan settings</strong> to set a max price. With "Match by price only" checked, listings under the price count as matches regardless of country; unchecked, price is an extra filter on top of the country match.
       By default the keyword must appear in the listing title; check "Also match against description" to count a listing as a match if the keyword shows up in EITHER the title or the description.
@@ -1090,6 +1188,7 @@ def home() -> HTMLResponse:
 def scan(
     keywords: str = Query(default=""),
     country: str = Query(default=DEFAULT_COUNTRY),
+    market: str = Query(default=DEFAULT_MARKET),
     limit: int = Query(default=DEFAULT_LIMIT, ge=0, le=500),
     workers: int = Query(default=LISTING_WORKERS, ge=1, le=MAX_LISTING_WORKERS),
     mode: str = Query(default=DEFAULT_MODE),
@@ -1113,7 +1212,7 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min)
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1129,6 +1228,7 @@ def job_page(job_id: str) -> HTMLResponse:
   <div class="card">
     <div class="summary">
       <span class="pill" id="job-id">Job: {html_escape(job_id)}</span>
+      <span class="pill" id="job-market">Market: loading...</span>
       <span class="pill" id="job-status">Status: loading...</span>
       <span class="pill" id="job-message">Message: starting...</span>
       <span class="pill" id="china-count">China signal: 0</span>
@@ -1379,6 +1479,7 @@ async function refreshJob() {
   const res = await fetch(`/api/job/${jobId}`);
   const data = await res.json();
   document.getElementById('job-status').textContent = 'Status: ' + data.status;
+  document.getElementById('job-market').textContent = 'Market: ' + (data.market || 'US');
   document.getElementById('job-message').textContent = 'Message: ' + data.message;
   document.getElementById('job-current').textContent = data.status === 'stopping' ? 'Stopping scan...' : data.message;
   document.getElementById('job-stats').textContent = `Progress: ${data.current} / ${data.total} | Scanned: ${(data.scanned || []).length} | Matches queued: ${data.results.length}`;
@@ -1530,6 +1631,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
             "<tr>"
             f"<td>{row['id']}</td>"
             f"<td>{html_escape(row['keyword'])}</td>"
+            f"<td>{html_escape(row.get('market', DEFAULT_MARKET))}</td>"
             f"<td><a href='{html_escape(row['listing_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['title'])}</a></td>"
             f"<td><a href='{html_escape(row['seller_page_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['seller_page_url']) or 'Unknown'}</a></td>"
             f"<td>{html_escape(row['seller_name'])}</td>"
@@ -1543,7 +1645,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
             "</tr>"
         )
     if not table_rows:
-        table_rows.append("<tr><td colspan='12' class='muted'>No items in this queue view.</td></tr>")
+        table_rows.append("<tr><td colspan='13' class='muted'>No items in this queue view.</td></tr>")
     body = f"""
 <header>
   <h1>{html_escape(APP_TITLE)}</h1>
@@ -1566,7 +1668,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <table data-resizable>
       <thead>
         <tr>
-          <th>ID</th><th>Keyword</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
+          <th>ID</th><th>Keyword</th><th>Market</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
         </tr>
       </thead>
       <tbody>
