@@ -709,6 +709,8 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "results": [],
         "scanned": [],
         "stop_requested": False,
+        "keyword_progress": {},
+        "seen_urls": [],
         "created_at": utc_now(),
         "finished_at": None,
     }
@@ -845,20 +847,29 @@ def run_job(job_id: str) -> None:
     elif mode == "thorough":
         worker_cap = min(worker_cap, 3)
 
-    seen_urls: set[str] = set()
-    discovered = 0
+    seen_urls: set[str] = set(job.get("seen_urls") or [])
+    discovered = len(job.get("scanned") or [])
 
     def process_keyword(position: int, keyword: str) -> None:
         nonlocal discovered
         with lock:
             if job.get("stop_requested"):
                 return
+            progress = (job.get("keyword_progress") or {}).get(keyword)
             job["message"] = f"Searching {market.label} for {keyword!r} ({position}/{len(keywords)})"
+        if progress and progress.get("finished"):
+            append_log(job, f"Skipping {keyword!r}: already finished in a previous run.")
+            return
         append_log(job, job["message"])
 
-        current_search_url = walmart_search_url(keyword, market)
+        if progress and progress.get("next_url"):
+            current_search_url = progress["next_url"]
+            pages_crawled = progress.get("pages_crawled", 0)
+            append_log(job, f"Resuming {keyword!r} from page {pages_crawled + 1}: {current_search_url}")
+        else:
+            current_search_url = walmart_search_url(keyword, market)
+            pages_crawled = 0
         visited_search_pages: set[str] = set()
-        pages_crawled = 0
         keyword_listing_count = 0
 
         while current_search_url and current_search_url not in visited_search_pages:
@@ -867,6 +878,12 @@ def run_job(job_id: str) -> None:
                     job["status"] = "stopped"
                     job["message"] = "Scan stopped by user."
                     job["finished_at"] = utc_now()
+                    job.setdefault("keyword_progress", {})[keyword] = {
+                        "next_url": current_search_url,
+                        "pages_crawled": pages_crawled,
+                        "finished": False,
+                    }
+                    job["seen_urls"] = list(seen_urls)
                     append_log(job, "User requested stop. Ending scan early.")
                     return
             if page_limit > 0 and pages_crawled >= page_limit:
@@ -950,6 +967,8 @@ def run_job(job_id: str) -> None:
         append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {len(job['results'])} match(es) so far.")
         with lock:
             job["current"] = min(job["total"], job.get("current", 0) + 1)
+            job.setdefault("keyword_progress", {})[keyword] = {"next_url": None, "pages_crawled": pages_crawled, "finished": True}
+            job["seen_urls"] = list(seen_urls)
 
     try:
         keyword_worker_count = min(KEYWORD_WORKERS, len(keywords)) if keywords else 1
@@ -1366,8 +1385,11 @@ def job_page(job_id: str) -> HTMLResponse:
       <div id="job-stats" class="tiny"></div>
     </div>
     <div class="top-actions">
-      <form action="/job/{html_escape(job_id)}/stop" method="post" style="display:inline; margin:0;">
+      <form id="stop-form" action="/job/{html_escape(job_id)}/stop" method="post" style="display:inline; margin:0;">
         <button type="submit" class="button secondary">Stop Scan</button>
+      </form>
+      <form id="resume-form" action="/job/{html_escape(job_id)}/resume" method="post" style="display:none; margin:0;">
+        <button type="submit" class="button">Resume Scan</button>
       </form>
       <a class="button" href="/queue">Open review queue</a>
       <a class="button secondary" href="/export.xlsx">Export queue</a>
@@ -1603,6 +1625,13 @@ async function refreshJob() {
   const res = await fetch(`/api/job/${jobId}`);
   const data = await res.json();
   document.getElementById('job-status').textContent = 'Status: ' + data.status;
+  const resumeForm = document.getElementById('resume-form');
+  const stopForm = document.getElementById('stop-form');
+  if (resumeForm && stopForm) {
+    const resumable = data.status === 'stopped' || data.status === 'error';
+    resumeForm.style.display = resumable ? 'inline' : 'none';
+    stopForm.style.display = resumable ? 'none' : 'inline';
+  }
   document.getElementById('job-market').textContent = 'Market: ' + (data.market || 'US');
   document.getElementById('job-message').textContent = 'Message: ' + data.message;
   document.getElementById('job-current').textContent = data.status === 'stopping' ? 'Stopping scan...' : data.message;
@@ -1723,13 +1752,35 @@ def stop_job(job_id: str) -> RedirectResponse:
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
 
+@app.post("/job/{job_id}/resume")
+def resume_job(job_id: str) -> RedirectResponse:
+    """Restart a stopped/errored job's run_job thread.
+
+    Relies on the per-keyword `keyword_progress` + `seen_urls` state that
+    run_job persists on every stop -- finished keywords are skipped
+    entirely, unfinished ones pick up from their saved next search page
+    instead of starting over from page 1.
+    """
+    with lock:
+        job = JOBS.get(job_id)
+        if not job or job.get("status") not in ("stopped", "error"):
+            return RedirectResponse(url=f"/job/{job_id}", status_code=302)
+        job["stop_requested"] = False
+        job["status"] = "running"
+        job["message"] = "Resuming scan..."
+        job["finished_at"] = None
+        append_log(job, "Resume requested by user -- picking up unfinished keywords where they left off.")
+    threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
+    return RedirectResponse(url=f"/job/{job_id}", status_code=302)
+
+
 @app.get("/api/job/{job_id}")
 def api_job(job_id: str) -> JSONResponse:
     with lock:
         job = JOBS.get(job_id)
         if not job:
             return JSONResponse({"error": "job not found"}, status_code=404)
-        payload = {k: v for k, v in job.items() if k != "keywords"}
+        payload = {k: v for k, v in job.items() if k not in ("keywords", "seen_urls")}
     return JSONResponse(payload)
 
 
