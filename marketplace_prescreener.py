@@ -29,7 +29,8 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 )
 DEFAULT_COUNTRY = "China"
-COUNTRY_OPTIONS = ["China", "US"]
+COUNTRY_OPTIONS = ["China", "US", "Any"]
+COUNTRY_OPTION_LABELS = {"China": "China", "US": "US", "Any": "Any (no country filter)"}
 DEFAULT_LIMIT = 0
 
 
@@ -89,6 +90,7 @@ KEYWORD_WORKERS = 3
 MAX_LISTING_WORKERS = 12
 DEFAULT_STOP_AFTER_FIRST_MATCH = False
 DEFAULT_MODE = "balanced"
+DEFAULT_SEARCH_TYPE = "keyword"
 DB_PATH = Path(__file__).with_name("prescreener.sqlite3")
 
 
@@ -138,6 +140,7 @@ class ListingRecord:
     description: str = ""
     counterfeit_review_count: int = 0
     market: str = DEFAULT_MARKET
+    listing_brand: str = ""
     id: int | None = None
 
 
@@ -326,6 +329,18 @@ def extract_price_text(product_html: str) -> str:
     return "Unknown"
 
 
+def extract_listing_brand(product_html: str) -> str:
+    """Pull the seller-supplied "Listing Brand" attribute off a product page.
+
+    Confirmed live (2026-08-27) that Walmart embeds this as a plain
+    `"brand":"..."` JSON field on both search-result tiles and the product
+    page itself, on both walmart.com and walmart.ca -- same field, same
+    shape, no market-specific handling needed.
+    """
+    m = re.search(r'"brand"\s*:\s*"([^"]*)"', product_html)
+    return normalize_space(m.group(1)) if m and m.group(1).strip() else ""
+
+
 def parse_price_value(price_text: str) -> float | None:
     m = re.search(r"([0-9]+(?:\.[0-9]+)?)", price_text or "")
     if not m:
@@ -358,6 +373,38 @@ def keyword_matches_listing(keyword: str, title: str, description: str, match_de
     if match_description and keyword_matches_text(keyword, description):
         return True
     return False
+
+
+def brand_matches(target_brand: str, listing_brand: str) -> bool:
+    """Exact, case-insensitive match against the listing's own Brand attribute.
+
+    Deliberately NOT a text-contains check against title/description -- live
+    testing showed listing brand codes (e.g. a private bulk-seller brand like
+    "WLBXH") almost never appear in the product title itself, so trusting the
+    embedded brand field is the only reliable signal for this search type.
+    """
+    if not target_brand.strip():
+        return True
+    return listing_brand.strip().lower() == target_brand.strip().lower()
+
+
+def term_matches_listing(
+    search_type: str,
+    term: str,
+    title: str,
+    description: str,
+    listing_brand: str,
+    match_description: bool,
+) -> bool:
+    """Dispatch to the right match rule for the job's search type.
+
+    Keeps `keyword_matches_listing` untouched (still used standalone by
+    keyword-mode jobs); brand-mode jobs get their own exact-match rule via
+    `brand_matches` instead of a text-contains check.
+    """
+    if search_type == "brand":
+        return brand_matches(term, listing_brand)
+    return keyword_matches_listing(term, title, description, match_description)
 
 
 COUNTRY_HINTS: dict[str, list[re.Pattern[str]]] = {
@@ -419,6 +466,15 @@ def extract_signals(html: str, target_country: str) -> tuple[str, str, str, str]
             country_signal = "US"
         elif china_evidence != "Unknown":
             country_signal = "China"
+        else:
+            country_signal = "Unknown"
+    elif target_country == "Any":
+        # No country filter requested -- still surface whichever signal (if
+        # any) is present on the page for visibility, just don't gate on it.
+        if china_evidence != "Unknown":
+            country_signal = "China"
+        elif us_evidence != "Unknown":
+            country_signal = "US"
         else:
             country_signal = "Unknown"
     else:
@@ -506,6 +562,7 @@ def init_db() -> None:
             'description': "alter table reviews add column description text not null default ''",
             'counterfeit_review_count': "alter table reviews add column counterfeit_review_count integer not null default 0",
             'market': f"alter table reviews add column market text not null default '{DEFAULT_MARKET}'",
+            'listing_brand': "alter table reviews add column listing_brand text not null default ''",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -523,8 +580,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -550,6 +607,7 @@ def save_record(record: ListingRecord) -> int:
                 record.description,
                 record.counterfeit_review_count,
                 record.market,
+                record.listing_brand,
             ),
         )
         conn.commit()
@@ -587,7 +645,7 @@ def export_reviews_xlsx() -> Path:
     ws = wb.active
     ws.title = "Queue"
     headers = [
-        "ID", "Job ID", "Keyword", "Market", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
+        "ID", "Job ID", "Keyword", "Listing Brand", "Market", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
         "Ship From Country", "Target Country", "Country Signal", "Evidence Source", "Evidence", "Scan Status",
         "Review State", "Created At",
     ]
@@ -597,6 +655,7 @@ def export_reviews_xlsx() -> Path:
             row.get("id", ""),
             row.get("job_id", ""),
             row.get("keyword", ""),
+            row.get("listing_brand", ""),
             row.get("market", DEFAULT_MARKET),
             row.get("search_url", ""),
             row.get("listing_url", ""),
@@ -624,14 +683,17 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE) -> str:
     job_id = uuid.uuid4().hex[:10]
     market_obj = get_market(market)
+    search_type = search_type if search_type in ("keyword", "brand") else DEFAULT_SEARCH_TYPE
+    term_label = "listing brand" if search_type == "brand" else "keyword"
     job = {
         "id": job_id,
         "keywords": keywords,
         "country": country,
         "market": market_obj.code,
+        "search_type": search_type,
         "limit": limit,
         "workers": workers,
         "mode": mode,
@@ -643,7 +705,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "message": "Queued",
         "current": 0,
         "total": max(len(keywords), 1),
-        "logs": [f"Queued scan for {len(keywords)} keyword(s) targeting {country} on {market_obj.label}."] ,
+        "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."] ,
         "results": [],
         "scanned": [],
         "stop_requested": False,
@@ -660,18 +722,18 @@ def append_log(job: dict, message: str) -> None:
         job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
     except BotChallengeDetected as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown", 0
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown", 0, ""
     except HTTPError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown", 0
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown", 0, ""
     except URLError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown", 0
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown", 0, ""
     except Exception as exc:  # pragma: no cover
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown", 0
+        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown", 0, ""
 
     image_url = extract_image_url(product_html)
     price_text = extract_price_text(product_html)
@@ -679,6 +741,7 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
         price_text = f"{price_text}{market.currency_suffix}"
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
     description = extract_description(product_html)
+    listing_brand = extract_listing_brand(product_html)
     seller_page_url = extract_seller_page_url(product_html, listing_url)
     seller_page_title = ""
     seller_html = ""
@@ -713,19 +776,27 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
 
     if seller_name == "Unknown" and seller_page_title:
         seller_name = seller_page_title
-    keyword_ok = keyword_matches_listing(keyword, title, description, match_description)
-    if country_signal == target_country:
+    keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description)
+    # "Any" target country means no country filter -- every listing is
+    # country-eligible regardless of what extract_signals found, so status
+    # depends purely on keyword_ok (or brand_ok). Otherwise, require an
+    # explicit match against the chosen target country, same as before.
+    country_ok = True if target_country == "Any" else (country_signal == target_country)
+    if country_ok:
         evidence = f"{evidence_source}: {evidence}"
         if not keyword_ok:
-            where = "title or description" if match_description else "title"
-            evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
-    status = "match" if (country_signal == target_country and keyword_ok) else "unknown"
-    return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count
+            if search_type == "brand":
+                evidence = f"{evidence} (listing brand {listing_brand or 'Unknown'!r} does not match target brand {keyword!r}, treating as non-match)"
+            else:
+                where = "title or description" if match_description else "title"
+                evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
+    status = "match" if (country_ok and keyword_ok) else "unknown"
+    return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None) -> tuple[ListingRecord, str]:
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE) -> tuple[ListingRecord, str]:
     market = market or MARKETS[DEFAULT_MARKET]
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market)
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -750,6 +821,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         price_value=parse_price_value(price_text),
         counterfeit_review_count=counterfeit_review_count,
         market=market.code,
+        listing_brand=listing_brand,
     )
     return record, status
 
@@ -760,6 +832,7 @@ def run_job(job_id: str) -> None:
     keywords = job["keywords"]
     country = job["country"]
     market = get_market(job.get("market"))
+    search_type = job.get("search_type", DEFAULT_SEARCH_TYPE)
     page_limit = job["limit"]
     mode = job.get("mode", DEFAULT_MODE)
     max_price = job.get("max_price")
@@ -833,7 +906,7 @@ def run_job(job_id: str) -> None:
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
                 with ThreadPoolExecutor(max_workers=worker_count) as pool:
                     futures = {
-                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market): listing_url
+                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type): listing_url
                         for listing_url in new_urls
                     }
                     for future in as_completed(futures):
@@ -848,7 +921,7 @@ def run_job(job_id: str) -> None:
                             keyword_listing_count += 1
                             job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
                         record.job_id = job_id
-                        keyword_ok = keyword_matches_listing(keyword, record.title, record.description, match_description)
+                        keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description)
                         if status in ("match", "unknown") and max_price is not None:
                             price_ok = record.price_value is not None and record.price_value <= max_price
                             if price_only:
@@ -1002,6 +1075,43 @@ function initThumbPreview() {
 }
 """
 
+SEARCH_FORM_SCRIPT = """
+function updateSearchTypeLabels() {
+  var isBrand = document.querySelector('input[name="search_type"]:checked').value === 'brand';
+  document.getElementById('keywords-label').textContent = isBrand ? 'Listing Brand(s)' : 'Keywords';
+  document.getElementById('keywords').placeholder = isBrand
+    ? 'Example:\nWLBXH\nSOMEOTHERBRAND'
+    : 'Example:\ndish soap\nlaundry detergent\npaper towels';
+  document.getElementById('keywords-hint').textContent = isBrand
+    ? 'One listing brand per line (exact match, case-insensitive). Every listing tagged with that brand is pulled, regardless of what the title says.'
+    : 'One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.';
+}
+
+function savePrescreenerPref(key, value) {
+  localStorage.setItem('prescreener_' + key, value);
+}
+
+function restorePrescreenerPrefs() {
+  var market = localStorage.getItem('prescreener_market');
+  var marketSelect = document.getElementById('market');
+  if (market && marketSelect) marketSelect.value = market;
+
+  var searchType = localStorage.getItem('prescreener_search_type');
+  if (searchType) {
+    var radio = document.querySelector('input[name="search_type"][value="' + searchType + '"]');
+    if (radio) radio.checked = true;
+  }
+
+  var country = localStorage.getItem('prescreener_country');
+  var countrySelect = document.getElementById('country');
+  if (country && countrySelect) countrySelect.value = country;
+
+  updateSearchTypeLabels();
+}
+
+document.addEventListener('DOMContentLoaded', restorePrescreenerPrefs);
+"""
+
 
 def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:    return HTMLResponse(
         f"""<!doctype html>
@@ -1093,14 +1203,24 @@ def home() -> HTMLResponse:
     <form action="/scan" method="get">
       <div class="grid" style="grid-template-columns: 1fr;">
         <div>
-          <label for="keywords">Keywords</label>
+          <label>Search by</label>
+          <div style="display:flex; gap:20px; margin-bottom:8px;">
+            <label style="display:flex; align-items:center; gap:6px; margin-bottom:0; font-weight:400;">
+              <input type="radio" name="search_type" value="keyword" checked onchange="savePrescreenerPref('search_type', this.value); updateSearchTypeLabels();" style="width:auto;"> Keyword
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; margin-bottom:0; font-weight:400;">
+              <input type="radio" name="search_type" value="brand" onchange="savePrescreenerPref('search_type', this.value); updateSearchTypeLabels();" style="width:auto;"> Listing Brand
+            </label>
+          </div>
+          <label for="keywords" id="keywords-label">Keywords</label>
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
+          <p class="tiny" id="keywords-hint">One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.</p>
         </div>
       </div>
         <div class="grid" style="margin-top:12px;">
           <div>
-            <label for="market">Market (which Walmart storefront to scan)</label>
-            <select id="market" name="market">
+            <label for="market">Market (which Walmart storefront to scan) &mdash; remembered between visits</label>
+            <select id="market" name="market" onchange="savePrescreenerPref('market', this.value)">
               {''.join(f'<option value="{html_escape(m.code)}"{" selected" if m.code == DEFAULT_MARKET else ""}>{html_escape(m.label)}</option>' for m in MARKETS.values())}
             </select>
           </div>
@@ -1110,8 +1230,8 @@ def home() -> HTMLResponse:
         <div class="grid" style="margin-top:12px;">
           <div>
             <label for="country">Target country</label>
-            <select id="country" name="country">
-              {''.join(f'<option value="{html_escape(option)}"{" selected" if option == DEFAULT_COUNTRY else ""}>{html_escape(option)}</option>' for option in COUNTRY_OPTIONS)}
+            <select id="country" name="country" onchange="savePrescreenerPref('country', this.value)">
+              {''.join(f'<option value="{html_escape(option)}"{" selected" if option == DEFAULT_COUNTRY else ""}>{html_escape(COUNTRY_OPTION_LABELS.get(option, option))}</option>' for option in COUNTRY_OPTIONS)}
             </select>
           </div>
           <div>
@@ -1177,11 +1297,14 @@ def home() -> HTMLResponse:
       Open <strong>Scan settings</strong> to set a max price. With "Match by price only" checked, listings under the price count as matches regardless of country; unchecked, price is an extra filter on top of the country match.
       By default the keyword must appear in the listing title; check "Also match against description" to count a listing as a match if the keyword shows up in EITHER the title or the description.
       Set a <strong>counterfeit review threshold</strong> to also flag sellers whose reviews frequently mention fake/counterfeit/knockoff products &mdash; this works across China, US, and Unknown alike, as long as the keyword still matches.
+      Switch <strong>Search by</strong> to "Listing Brand" to instead pull every listing tagged with a specific seller-supplied Brand attribute (e.g. a private bulk-seller brand code) &mdash; brand mode trusts the listing's own Brand field exactly, it does not require the brand text to appear in the title.
+      Set <strong>Target country</strong> to "Any (no country filter)" to pull every listing matching your keyword/brand regardless of country signal &mdash; useful for a pure brand sweep where you just want everything under that brand, not just the China/US-flagged subset.
+      Your <strong>Market</strong>, <strong>Target country</strong>, and <strong>Search by</strong> choices are remembered in this browser between visits.
     </p>
   </div>
 </main>
 """
-    return html_page(APP_TITLE, body)
+    return html_page(APP_TITLE, body, SEARCH_FORM_SCRIPT)
 
 
 @app.get("/scan", response_class=HTMLResponse)
@@ -1189,6 +1312,7 @@ def scan(
     keywords: str = Query(default=""),
     country: str = Query(default=DEFAULT_COUNTRY),
     market: str = Query(default=DEFAULT_MARKET),
+    search_type: str = Query(default=DEFAULT_SEARCH_TYPE),
     limit: int = Query(default=DEFAULT_LIMIT, ge=0, le=500),
     workers: int = Query(default=LISTING_WORKERS, ge=1, le=MAX_LISTING_WORKERS),
     mode: str = Query(default=DEFAULT_MODE),
@@ -1212,7 +1336,7 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market)
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1631,6 +1755,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
             "<tr>"
             f"<td>{row['id']}</td>"
             f"<td>{html_escape(row['keyword'])}</td>"
+            f"<td>{html_escape(row.get('listing_brand', ''))}</td>"
             f"<td>{html_escape(row.get('market', DEFAULT_MARKET))}</td>"
             f"<td><a href='{html_escape(row['listing_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['title'])}</a></td>"
             f"<td><a href='{html_escape(row['seller_page_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['seller_page_url']) or 'Unknown'}</a></td>"
@@ -1645,7 +1770,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
             "</tr>"
         )
     if not table_rows:
-        table_rows.append("<tr><td colspan='13' class='muted'>No items in this queue view.</td></tr>")
+        table_rows.append("<tr><td colspan='14' class='muted'>No items in this queue view.</td></tr>")
     body = f"""
 <header>
   <h1>{html_escape(APP_TITLE)}</h1>
@@ -1668,7 +1793,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <table data-resizable>
       <thead>
         <tr>
-          <th>ID</th><th>Keyword</th><th>Market</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
+          <th>ID</th><th>Keyword</th><th>Listing Brand</th><th>Market</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
         </tr>
       </thead>
       <tbody>
