@@ -85,9 +85,11 @@ on port 8001):
   since it lives outside the project folder) that's pinned to the Dock. It
   just calls `Launch Prescreener.command` under the hood -- one source of
   truth, no duplicated launch logic. Its icon comes from `assets/AppIcon.icns`
-  in this repo (built from `assets/icon.png`, a variant of the RNA/Proactive
-  Reporter blue-circle mark with a magnifying glass). If you ever need to
-  rebuild the `.app` on a new machine, copy `assets/AppIcon.icns` into
+  in this repo (built from `assets/icon.png`, adapted from the RNA badge
+  design -- navy squircle, glowing blue border, serif "RNA" wordmark,
+  "PRESCREENER" letter-spaced beneath it. Reference design lives at
+  `assets/rna_reference_design.png`. If you ever need to rebuild the `.app`
+  on a new machine, copy `assets/AppIcon.icns` into
   `Marketplace Prescreener.app/Contents/Resources/AppIcon.icns`.
 
 ## Contributing
