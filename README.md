@@ -69,6 +69,27 @@ python search_helper.py
 python marketplace_prescreener.py
 ```
 
+### Quick launch (macOS)
+
+No need to open a terminal every time -- two shortcuts do the venv-activate +
+run + open-browser dance for you (both just run `marketplace_prescreener.py`
+on port 8001):
+
+- **`launch.sh`** -- run from a terminal (`./launch.sh`). Creates the `.venv`
+  and installs requirements automatically if they're missing. If the server's
+  already running, it just opens your browser instead of double-launching.
+- **`Launch Prescreener.command`** -- double-click in Finder. Same logic,
+  just wrapped so macOS knows to execute it in Terminal.
+- **Dock icon** -- there's also a tiny `.app` wrapper at
+  `~/Applications/Marketplace Prescreener.app` (not tracked in this repo,
+  since it lives outside the project folder) that's pinned to the Dock. It
+  just calls `Launch Prescreener.command` under the hood -- one source of
+  truth, no duplicated launch logic. Its icon comes from `assets/AppIcon.icns`
+  in this repo (built from `assets/icon.png`, a variant of the RNA/Proactive
+  Reporter blue-circle mark with a magnifying glass). If you ever need to
+  rebuild the `.app` on a new machine, copy `assets/AppIcon.icns` into
+  `Marketplace Prescreener.app/Contents/Resources/AppIcon.icns`.
+
 ## Contributing
 
 Standard workflow:
