@@ -921,18 +921,26 @@ def run_job(job_id: str) -> None:
             else:
                 worker_count = min(worker_cap, len(new_urls))
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
-                with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                    futures = {
-                        pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type): listing_url
-                        for listing_url in new_urls
-                    }
-                    for future in as_completed(futures):
-                        listing_url = futures[future]
-                        try:
-                            record, status = future.result()
-                        except Exception as exc:
-                            append_log(job, f"Listing scan failed for {listing_url}: {exc}")
-                            continue
+                # NOTE: managed manually (not via `with`) so a mid-batch stop can
+                # cancel queued-but-not-yet-started listings immediately instead of
+                # blocking until the *entire* page's listings finish scanning --
+                # that block-until-done behavior is what used to leave jobs stuck
+                # in "stopping" forever (Resume button never appeared).
+                pool = ThreadPoolExecutor(max_workers=worker_count)
+                futures = {
+                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type): listing_url
+                    for listing_url in new_urls
+                }
+                completed_urls: set[str] = set()
+                stopped_mid_page = False
+                for future in as_completed(futures):
+                    listing_url = futures[future]
+                    completed_urls.add(listing_url)
+                    try:
+                        record, status = future.result()
+                    except Exception as exc:
+                        append_log(job, f"Listing scan failed for {listing_url}: {exc}")
+                    else:
                         with lock:
                             discovered += 1
                             keyword_listing_count += 1
@@ -958,6 +966,32 @@ def run_job(job_id: str) -> None:
                                 job["results"].append(asdict(record))
                         if status == "match":
                             append_log(job, f"Match found: {record.title or listing_url}")
+                    with lock:
+                        if job.get("stop_requested"):
+                            stopped_mid_page = True
+                    if stopped_mid_page:
+                        break
+
+                if stopped_mid_page:
+                    # Cancel whatever hasn't started yet -- already-running threads
+                    # finish on their own but we don't wait around for them.
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    unprocessed = [u for u in new_urls if u not in completed_urls]
+                    with lock:
+                        for u in unprocessed:
+                            seen_urls.discard(u)
+                        job["status"] = "stopped"
+                        job["message"] = "Scan stopped by user."
+                        job["finished_at"] = utc_now()
+                        job.setdefault("keyword_progress", {})[keyword] = {
+                            "next_url": current_search_url,
+                            "pages_crawled": pages_crawled - 1,
+                            "finished": False,
+                        }
+                        job["seen_urls"] = list(seen_urls)
+                    append_log(job, f"User requested stop mid-page ({len(unprocessed)} listing(s) on this page left for next resume). Ending scan early.")
+                    return
+                pool.shutdown(wait=True)
 
             if not next_search_url or next_search_url in visited_search_pages:
                 append_log(job, f"No more search pages for {keyword!r}.")
@@ -1724,7 +1758,9 @@ async function refreshJob() {
   wireGroupToggles(chinaBody);
   wireGroupToggles(usBody);
   wireGroupToggles(unknownBody);
-  const terminalStatuses = new Set(['done', 'stopped', 'error', 'stopping']);
+  // 'stopping' is deliberately NOT terminal -- keep polling until run_job
+  // flips it to 'stopped', otherwise the Resume button never appears.
+  const terminalStatuses = new Set(['done', 'stopped', 'error']);
   if (!terminalStatuses.has(data.status)) {
     setTimeout(refreshJob, 1200);
   }
@@ -1744,7 +1780,12 @@ initThumbPreview();
 def stop_job(job_id: str) -> RedirectResponse:
     with lock:
         job = JOBS.get(job_id)
-        if job:
+        # Only meaningful if a run_job thread is actually still alive to act on
+        # the flag. If the job already reached a terminal state (done/error/
+        # stopped) -- e.g. it finished a beat before the click landed -- there's
+        # no thread left to ever flip "stopping" onward, which used to leave
+        # the job stuck forever with no Resume button. Just no-op instead.
+        if job and job.get("status") == "running":
             job["stop_requested"] = True
             job["status"] = "stopping"
             job["message"] = "Stopping scan..."
