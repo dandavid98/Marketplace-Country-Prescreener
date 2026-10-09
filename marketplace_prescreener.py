@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
 
@@ -60,6 +61,17 @@ BOT_CHALLENGE_PATTERNS = [
 app = FastAPI(title=APP_TITLE)
 lock = threading.RLock()
 JOBS: dict[str, dict] = {}
+LATEST_JOB_ID: str | None = None
+
+# Live jobs keep only a bounded recent window of scanned/results/logs in memory
+# so a long-running scan (thousands of listings) doesn't grow an ever-larger
+# JSON payload that gets re-shipped to the browser on every poll -- that was
+# crashing extended-run scans. Every record is still saved to SQLite in full;
+# this cap only affects the live "Latest scan rows" view, and accurate totals
+# are tracked separately via job["stats"] regardless of trimming.
+MAX_LIVE_SCANNED = 300
+MAX_LIVE_RESULTS = 300
+MAX_LIVE_LOGS = 300
 
 
 @dataclass
@@ -86,6 +98,7 @@ class ListingRecord:
     price_value: float | None = None
     description: str = ""
     counterfeit_review_count: int = 0
+    counterfeit_checked: bool = False
     id: int | None = None
 
 
@@ -157,6 +170,16 @@ def extract_next_search_url(search_html: str, current_url: str) -> str:
     params["page"] = [str(current_page + 1)]
     next_query = urlencode(params, doseq=True)
     return urlunparse(parsed._replace(query=next_query))
+
+
+def is_walmart_sold_and_shipped(product_html: str) -> bool:
+    # Walmart embeds sellerName in the product page JSON. When the item is
+    # sold and shipped directly by Walmart, this value is literally
+    # "Walmart.com" -- verified against known Walmart-fulfilled and known
+    # real third-party (China-based) listings, so this is a dedicated,
+    # reliable signal rather than a fuzzy text guess.
+    names = set(re.findall(r'"sellerName":"([^"]*)"', product_html))
+    return names == {"Walmart.com"}
 
 
 def extract_seller_page_url(product_html: str, listing_url: str) -> str:
@@ -428,6 +451,7 @@ def init_db() -> None:
             'price_value': "alter table reviews add column price_value real",
             'description': "alter table reviews add column description text not null default ''",
             'counterfeit_review_count': "alter table reviews add column counterfeit_review_count integer not null default 0",
+            'counterfeit_checked': "alter table reviews add column counterfeit_checked integer not null default 0",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -445,8 +469,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, counterfeit_checked
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -471,13 +495,14 @@ def save_record(record: ListingRecord) -> int:
                 record.price_value,
                 record.description,
                 record.counterfeit_review_count,
+                int(record.counterfeit_checked),
             ),
         )
         conn.commit()
         return int(cur.lastrowid)
 
 
-def get_reviews(review_state: str | None = None, country_signal: str | None = None) -> list[dict]:
+def get_reviews(review_state: str | None = None, country_signal: str | None = None, job_id: str | None = None) -> list[dict]:
     sql = "select * from reviews"
     clauses: list[str] = []
     params: list[str] = []
@@ -487,6 +512,9 @@ def get_reviews(review_state: str | None = None, country_signal: str | None = No
     if country_signal and country_signal != "all":
         clauses.append("country_signal = ?")
         params.append(country_signal)
+    if job_id and job_id != "all":
+        clauses.append("job_id = ?")
+        params.append(job_id)
     if clauses:
         sql += " where " + " and ".join(clauses)
     sql += " order by id desc"
@@ -502,39 +530,35 @@ def update_review_state(record_id: int, review_state: str) -> None:
         conn.commit()
 
 
-def export_reviews_xlsx() -> Path:
-    rows = get_reviews("all")
+def export_reviews_xlsx(job_id: str | None = None) -> Path:
+    rows = get_reviews("all", job_id=job_id)
+    any_counterfeit_checked = any(row.get("counterfeit_checked") for row in rows)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = [
-        "ID", "Job ID", "Keyword", "Search URL", "Listing URL", "Seller Page URL", "Title", "Seller Name", "Seller ID",
-        "Ship From Country", "Target Country", "Country Signal", "Evidence Source", "Evidence", "Scan Status",
-        "Review State", "Created At",
-    ]
+    headers = ["Keyword", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country"]
+    if any_counterfeit_checked:
+        headers.append("# of Counterfeit Reviews")
     ws.append(headers)
     for row in rows:
-        ws.append([
-            row.get("id", ""),
-            row.get("job_id", ""),
+        values = [
             row.get("keyword", ""),
-            row.get("search_url", ""),
-            row.get("listing_url", ""),
-            row.get("seller_page_url", ""),
             row.get("title", ""),
-            row.get("seller_name", ""),
+            row.get("listing_url", ""),
+            row.get("seller_name", "") or "Unknown",
             row.get("seller_id", "Unknown"),
-            row.get("ship_from_country", ""),
-            row.get("target_country", ""),
+            row.get("price_text", ""),
             row.get("country_signal", ""),
-            row.get("evidence_source", ""),
-            row.get("evidence", ""),
-            row.get("scan_status", ""),
-            row.get("review_state", ""),
-            row.get("created_at", ""),
-        ])
+        ]
+        if any_counterfeit_checked:
+            checked = row.get("counterfeit_checked")
+            values.append(row.get("counterfeit_review_count", 0) if checked else "")
+        ws.append(values)
     for cell in ws[1]:
         cell.font = cell.font.copy(bold=True)
+    last_col = get_column_letter(len(headers))
+    ws.auto_filter.ref = f"A1:{last_col}{ws.max_row}"
     tmp = Path(tempfile.mkstemp(suffix=".xlsx", prefix="prescreener_")[1])
     wb.save(tmp)
     return tmp
@@ -545,6 +569,7 @@ def split_keywords(raw: str) -> list[str]:
 
 
 def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None) -> str:
+    global LATEST_JOB_ID
     job_id = uuid.uuid4().hex[:10]
     job = {
         "id": job_id,
@@ -564,18 +589,22 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "logs": [f"Queued scan for {len(keywords)} keyword(s) targeting {country}."] ,
         "results": [],
         "scanned": [],
+        "stats": {"scanned_total": 0, "results_total": 0, "china_total": 0, "us_total": 0, "unknown_total": 0},
         "stop_requested": False,
         "created_at": utc_now(),
         "finished_at": None,
     }
     with lock:
         JOBS[job_id] = job
+        LATEST_JOB_ID = job_id
     return job_id
 
 
 def append_log(job: dict, message: str) -> None:
     with lock:
         job["logs"].append(f"[{utc_now().split('T')[1][:8]}] {message}")
+        if len(job["logs"]) > MAX_LIVE_LOGS:
+            del job["logs"][: len(job["logs"]) - MAX_LIVE_LOGS]
 
 
 def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int]:
@@ -595,6 +624,14 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     price_text = extract_price_text(product_html)
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
     description = extract_description(product_html)
+
+    # Sold-and-shipped-by-Walmart listings carry zero third-party/China
+    # marketplace risk. Skip the seller-page lookup entirely for these --
+    # saves a wasted request and keeps them out of match consideration.
+    if is_walmart_sold_and_shipped(product_html):
+        evidence = "Sold and shipped by Walmart.com (no third-party seller lookup needed)"
+        return "US", title, description, "", "Walmart.com", "Walmart.com", "US", "product page", evidence, "walmart_sold", "", item_id, image_url, price_text, 0
+
     seller_page_url = extract_seller_page_url(product_html, listing_url)
     seller_page_title = ""
     seller_html = ""
@@ -662,6 +699,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         price_text=price_text,
         price_value=parse_price_value(price_text),
         counterfeit_review_count=counterfeit_review_count,
+        counterfeit_checked=check_counterfeit,
     )
     return record, status
 
@@ -760,7 +798,12 @@ def run_job(job_id: str) -> None:
                             job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
                         record.job_id = job_id
                         keyword_ok = keyword_matches_listing(keyword, record.title, record.description, match_description)
-                        if status in ("match", "unknown") and max_price is not None:
+                        if status == "walmart_sold":
+                            # Sold-and-shipped-by-Walmart carries zero third-party
+                            # risk by definition -- never let price/counterfeit
+                            # promotion logic flip it to a match.
+                            pass
+                        elif status in ("match", "unknown") and max_price is not None:
                             price_ok = record.price_value is not None and record.price_value <= max_price
                             if price_only:
                                 status = "match" if (price_ok and keyword_ok) else "unknown"
@@ -768,15 +811,24 @@ def run_job(job_id: str) -> None:
                                 status = "unknown"
                             record.scan_status = status
                             record.review_state = "pending" if status == "match" else "not_queued"
-                        if status != "match" and keyword_ok and counterfeit_min is not None and record.counterfeit_review_count >= counterfeit_min:
+                        if status not in ("match", "walmart_sold") and keyword_ok and counterfeit_min is not None and record.counterfeit_review_count >= counterfeit_min:
                             status = "match"
                             record.scan_status = status
                             record.review_state = "pending"
                         record.id = save_record(record)
                         with lock:
+                            stats = job["stats"]
+                            stats["scanned_total"] += 1
+                            signal_key = {"China": "china_total", "US": "us_total"}.get(record.country_signal, "unknown_total")
+                            stats[signal_key] += 1
                             job["scanned"].append(asdict(record))
+                            if len(job["scanned"]) > MAX_LIVE_SCANNED:
+                                del job["scanned"][: len(job["scanned"]) - MAX_LIVE_SCANNED]
                             if status == "match":
+                                stats["results_total"] += 1
                                 job["results"].append(asdict(record))
+                                if len(job["results"]) > MAX_LIVE_RESULTS:
+                                    del job["results"][: len(job["results"]) - MAX_LIVE_RESULTS]
                         if status == "match":
                             append_log(job, f"Match found: {record.title or listing_url}")
 
@@ -785,7 +837,7 @@ def run_job(job_id: str) -> None:
                 break
             current_search_url = next_search_url
 
-        append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {len(job['results'])} match(es) so far.")
+        append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {job['stats']['results_total']} match(es) so far.")
         with lock:
             job["current"] = min(job["total"], job.get("current", 0) + 1)
 
@@ -807,10 +859,10 @@ def run_job(job_id: str) -> None:
         with lock:
             if job.get("stop_requested"):
                 job["status"] = "stopped"
-                job["message"] = f"Stopped. {len(job['results'])} match(es) queued for review."
+                job["message"] = f"Stopped. {job['stats']['results_total']} match(es) queued for review."
             else:
                 job["status"] = "done"
-                job["message"] = f"Finished. {len(job['results'])} match(es) queued for review."
+                job["message"] = f"Finished. {job['stats']['results_total']} match(es) queued for review."
             job["current"] = job["total"]
             job["finished_at"] = utc_now()
         append_log(job, job["message"])
@@ -1145,8 +1197,8 @@ def job_page(job_id: str) -> HTMLResponse:
       <form action="/job/{html_escape(job_id)}/stop" method="post" style="display:inline; margin:0;">
         <button type="submit" class="button secondary">Stop Scan</button>
       </form>
-      <a class="button" href="/queue">Open review queue</a>
-      <a class="button secondary" href="/export.xlsx">Export queue</a>
+      <a class="button" href="/queue?job={html_escape(job_id)}">Open review queue</a>
+      <a class="button secondary" href="/export.xlsx?job={html_escape(job_id)}">Export queue</a>
       <a class="button secondary" href="/">New scan</a>
     </div>
     <div class="card" style="margin:0; background:#f9fbff;">
@@ -1378,10 +1430,11 @@ if (matchesOnlyToggleEl) {
 async function refreshJob() {
   const res = await fetch(`/api/job/${jobId}`);
   const data = await res.json();
+  const stats = data.stats || {};
   document.getElementById('job-status').textContent = 'Status: ' + data.status;
   document.getElementById('job-message').textContent = 'Message: ' + data.message;
   document.getElementById('job-current').textContent = data.status === 'stopping' ? 'Stopping scan...' : data.message;
-  document.getElementById('job-stats').textContent = `Progress: ${data.current} / ${data.total} | Scanned: ${(data.scanned || []).length} | Matches queued: ${data.results.length}`;
+  document.getElementById('job-stats').textContent = `Progress: ${data.current} / ${data.total} | Scanned: ${stats.scanned_total || 0} | Matches queued: ${stats.results_total || 0}`;
   const logs = document.getElementById('job-logs');
   logs.innerHTML = data.logs.map(line => '<div>' + line.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>').join('');
   logs.scrollTop = logs.scrollHeight;
@@ -1391,9 +1444,9 @@ async function refreshJob() {
   const chinaRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'China');
   const usRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'US');
   const unknownRows = scanned.filter(r => (r.country_signal || 'Unknown') === 'Unknown');
-  document.getElementById('china-count').textContent = `China signal: ${chinaRows.length}`;
-  document.getElementById('us-count').textContent = `US / explicit non-China signal: ${usRows.length}`;
-  document.getElementById('unknown-count').textContent = `Unknown signal: ${unknownRows.length}`;
+  document.getElementById('china-count').textContent = `China signal: ${stats.china_total || 0}`;
+  document.getElementById('us-count').textContent = `US / explicit non-China signal: ${stats.us_total || 0}`;
+  document.getElementById('unknown-count').textContent = `Unknown signal: ${stats.unknown_total || 0}`;
   const latestChinaBody = document.getElementById('latest-china-body');
   if (latestChinaBody) {
     function renderLatestRows(rows) {
@@ -1421,60 +1474,76 @@ async function refreshJob() {
     document.getElementById('latest-us-body').innerHTML = renderLatestRows(usRows);
     document.getElementById('latest-unknown-body').innerHTML = renderLatestRows(unknownRows);
   }
-  const filterTextEl = document.getElementById('filter-text');
-  const filterText = (filterTextEl ? filterTextEl.value : '').trim().toLowerCase();
-  const filterStatusEl = document.getElementById('filter-status');
-  const filterStatus = filterStatusEl ? filterStatusEl.value : 'all';
-  const applyFilters = (rows) => rows.filter(r => {
-    const haystack = [r.keyword, r.title, r.listing_url, r.seller_page_url, r.seller_name, r.ship_from_country, r.country_signal, r.evidence, r.scan_status].join(' ').toLowerCase();
-    if (filterText && !haystack.includes(filterText)) return false;
-    if (filterStatus !== 'all' && (r.scan_status || 'unknown') !== filterStatus) return false;
-    return true;
-  });
-  const chinaTable = document.getElementById('china-table');
-  const usTable = document.getElementById('us-table');
-  const unknownTable = document.getElementById('unknown-table');
-  const chinaBody = document.getElementById('china-results-body');
-  const usBody = document.getElementById('us-results-body');
-  const unknownBody = document.getElementById('unknown-results-body');
-  const toggleChina = document.getElementById('toggle-china');
-  const toggleUS = document.getElementById('toggle-us');
-  const toggleUnknown = document.getElementById('toggle-unknown');
-  const clearFilters = document.getElementById('clear-filters');
-  const rerender = () => {
-    const filteredChina = applyFilters(chinaRows);
-    const filteredUS = applyFilters(usRows);
-    const filteredUnknown = applyFilters(unknownRows);
-    chinaBody.innerHTML = filteredChina.length ? renderGroupedRows(filteredChina, 'china') : '<tr><td colspan="8" class="muted">No China results match the filters.</td></tr>';
-    usBody.innerHTML = filteredUS.length ? renderGroupedRows(filteredUS, 'us') : '<tr><td colspan="8" class="muted">No US results match the filters.</td></tr>';
-    unknownBody.innerHTML = filteredUnknown.length ? renderGroupedRows(filteredUnknown, 'unknown') : '<tr><td colspan="8" class="muted">No Unknown results match the filters.</td></tr>';
-  };
-  toggleUS.onclick = () => {
-    const hidden = usTable.style.display === 'none';
-    usTable.style.display = hidden ? '' : 'none';
-    toggleUS.textContent = hidden ? 'Hide Results' : 'Show Results';
-  };
-  toggleUnknown.onclick = () => {
-    const hidden = unknownTable.style.display === 'none';
-    unknownTable.style.display = hidden ? '' : 'none';
-    toggleUnknown.textContent = hidden ? 'Hide Results' : 'Show Results';
-  };
-  clearFilters.onclick = () => {
-    document.getElementById('filter-text').value = '';
-    document.getElementById('filter-status').value = 'all';
-    rerender();
-  };
-  document.getElementById('filter-text').addEventListener('input', rerender);
-  document.getElementById('filter-status').addEventListener('change', rerender);
-  rerender();
-  wireGroupToggles(chinaBody);
-  wireGroupToggles(usBody);
-  wireGroupToggles(unknownBody);
+  // Update shared state and rerender via the filter table's rerender()
+  // (wired ONCE below, outside this polling function) instead of
+  // re-attaching input/change listeners on every 1.2s poll. Stacking a
+  // fresh listener per poll never gets cleaned up and each one holds a
+  // full copy of the scanned rows via closure -- that's what was slowly
+  // leaking memory and crashing the tab on long-running scans.
+  filterState.chinaRows = chinaRows;
+  filterState.usRows = usRows;
+  filterState.unknownRows = unknownRows;
+  rerenderFilteredTables();
+  wireGroupToggles(document.getElementById('china-results-body'));
+  wireGroupToggles(document.getElementById('us-results-body'));
+  wireGroupToggles(document.getElementById('unknown-results-body'));
   const terminalStatuses = new Set(['done', 'stopped', 'error', 'stopping']);
   if (!terminalStatuses.has(data.status)) {
     setTimeout(refreshJob, 1200);
   }
 }
+
+const filterState = { chinaRows: [], usRows: [], unknownRows: [] };
+function applyFilters(rows) {
+  const filterTextEl = document.getElementById('filter-text');
+  const filterText = (filterTextEl ? filterTextEl.value : '').trim().toLowerCase();
+  const filterStatusEl = document.getElementById('filter-status');
+  const filterStatus = filterStatusEl ? filterStatusEl.value : 'all';
+  return rows.filter(r => {
+    const haystack = [r.keyword, r.title, r.listing_url, r.seller_page_url, r.seller_name, r.ship_from_country, r.country_signal, r.evidence, r.scan_status].join(' ').toLowerCase();
+    if (filterText && !haystack.includes(filterText)) return false;
+    if (filterStatus !== 'all' && (r.scan_status || 'unknown') !== filterStatus) return false;
+    return true;
+  });
+}
+function rerenderFilteredTables() {
+  const chinaBody = document.getElementById('china-results-body');
+  const usBody = document.getElementById('us-results-body');
+  const unknownBody = document.getElementById('unknown-results-body');
+  const filteredChina = applyFilters(filterState.chinaRows);
+  const filteredUS = applyFilters(filterState.usRows);
+  const filteredUnknown = applyFilters(filterState.unknownRows);
+  chinaBody.innerHTML = filteredChina.length ? renderGroupedRows(filteredChina, 'china') : '<tr><td colspan="8" class="muted">No China results match the filters.</td></tr>';
+  usBody.innerHTML = filteredUS.length ? renderGroupedRows(filteredUS, 'us') : '<tr><td colspan="8" class="muted">No US results match the filters.</td></tr>';
+  unknownBody.innerHTML = filteredUnknown.length ? renderGroupedRows(filteredUnknown, 'unknown') : '<tr><td colspan="8" class="muted">No Unknown results match the filters.</td></tr>';
+  wireGroupToggles(chinaBody);
+  wireGroupToggles(usBody);
+  wireGroupToggles(unknownBody);
+}
+// Wired ONCE here -- not inside refreshJob -- so repeated polling never
+// stacks duplicate listeners.
+document.getElementById('toggle-us').onclick = () => {
+  const usTable = document.getElementById('us-table');
+  const toggleUS = document.getElementById('toggle-us');
+  const hidden = usTable.style.display === 'none';
+  usTable.style.display = hidden ? '' : 'none';
+  toggleUS.textContent = hidden ? 'Hide Results' : 'Show Results';
+};
+document.getElementById('toggle-unknown').onclick = () => {
+  const unknownTable = document.getElementById('unknown-table');
+  const toggleUnknown = document.getElementById('toggle-unknown');
+  const hidden = unknownTable.style.display === 'none';
+  unknownTable.style.display = hidden ? '' : 'none';
+  toggleUnknown.textContent = hidden ? 'Hide Results' : 'Show Results';
+};
+document.getElementById('clear-filters').onclick = () => {
+  document.getElementById('filter-text').value = '';
+  document.getElementById('filter-status').value = 'all';
+  rerenderFilteredTables();
+};
+document.getElementById('filter-text').addEventListener('input', rerenderFilteredTables);
+document.getElementById('filter-status').addEventListener('change', rerenderFilteredTables);
+
 refreshJob();
 initResizableTables();
 initThumbPreview();
@@ -1509,18 +1578,25 @@ def api_job(job_id: str) -> JSONResponse:
 
 
 @app.get("/queue", response_class=HTMLResponse)
-def queue_page(state: str = Query(default="pending"), country_signal: str = Query(default="China")) -> HTMLResponse:
-    rows = get_reviews(state, country_signal)
-    state_counts = {s: len(get_reviews(s, country_signal)) for s in ["pending", "approved", "rejected", "not_queued"]}
-    country_counts = {c: len(get_reviews(state, c)) for c in ["China", "US", "Unknown", "all"]}
+def queue_page(state: str = Query(default="pending"), country_signal: str = Query(default="China"), job: str = Query(default="latest")) -> HTMLResponse:
+    job_filter = LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
+    scope_note = "Showing results from your most recent scan only." if job == "latest" else "Showing results from ALL scans ever run (full history)."
+    scope_toggle = (
+        f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=all">View all scans (history)</a>'
+        if job == "latest" else
+        f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=latest">Back to latest scan only</a>'
+    )
+    rows = get_reviews(state, country_signal, job_id=job_filter)
+    state_counts = {s: len(get_reviews(s, country_signal, job_id=job_filter)) for s in ["pending", "approved", "rejected", "not_queued"]}
+    country_counts = {c: len(get_reviews(state, c, job_id=job_filter)) for c in ["China", "US", "Unknown", "all"]}
     state_links = "".join(
-        f'<a class="button secondary" href="/queue?state={s}&country_signal={country_signal}">{s.title()} ({state_counts[s]})</a>' for s in state_counts
+        f'<a class="button secondary" href="/queue?state={s}&country_signal={country_signal}&job={job}">{s.title()} ({state_counts[s]})</a>' for s in state_counts
     )
     country_links = "".join(
-        f'<a class="button secondary" href="/queue?state={state}&country_signal={c}">{c.title()} ({country_counts[c]})</a>' for c in ["China", "US", "Unknown", "all"]
+        f'<a class="button secondary" href="/queue?state={state}&country_signal={c}&job={job}">{c.title()} ({country_counts[c]})</a>' for c in ["China", "US", "Unknown", "all"]
     )
     table_rows = []
-    return_to = quote_plus(f"/queue?state={state}&country_signal={country_signal}")
+    return_to = quote_plus(f"/queue?state={state}&country_signal={country_signal}&job={job}")
     for row in rows:
         actions = (
             f"<a class='button' href='/review/{row['id']}/approve?return_to={return_to}'>Approve</a>"
@@ -1553,8 +1629,10 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
   <div class="card">
     <div class="top-actions">
       <a class="button" href="/">New scan</a>
-      <a class="button secondary" href="/export.xlsx">Export XLSX</a>
+      <a class="button secondary" href="/export.xlsx?job={quote_plus(job)}">Export XLSX</a>
+      {scope_toggle}
     </div>
+    <p class="tiny" style="margin: 6px 0 0;">{html_escape(scope_note)}</p>
     <div class="row-actions">
       <div class="tiny" style="width:100%; margin-bottom:6px;">Review status</div>
       {state_links}
@@ -1588,8 +1666,9 @@ def review_action(record_id: int, action: str, return_to: str = "/queue") -> Red
 
 
 @app.get("/export.xlsx")
-def export_xlsx() -> FileResponse:
-    path = export_reviews_xlsx()
+def export_xlsx(job: str = Query(default="latest")) -> FileResponse:
+    job_filter = LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
+    path = export_reviews_xlsx(job_id=job_filter)
     return FileResponse(
         path,
         filename="prescreener_review_queue.xlsx",
