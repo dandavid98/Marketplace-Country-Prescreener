@@ -611,6 +611,17 @@ def init_db() -> None:
         for col, sql in additions.items():
             if col not in cols:
                 conn.execute(sql)
+        # Repair rows saved by the old shifted failure tuple (see _failed_scan):
+        # status ended up in `evidence` and the message in `evidence_source`.
+        # The match is exact and only hits blank-status rows, so this is a no-op
+        # once repaired and safe on any copy of the DB (e.g. Ariel's).
+        conn.execute(
+            """
+            update reviews
+               set scan_status = evidence, evidence = evidence_source, evidence_source = 'product page'
+             where scan_status = '' and evidence in ('error', 'blocked')
+            """
+        )
         conn.commit()
 
 
@@ -775,18 +786,28 @@ def append_log(job: dict, message: str) -> None:
             del job["logs"][: len(job["logs"]) - MAX_LIVE_LOGS]
 
 
+def _failed_scan(item_id: str, status: str, evidence: str) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
+    """scan_listing's result when the product page itself couldn't be loaded.
+
+    One place to build it: the four failure paths used to hand-write this
+    16-field tuple, dropped evidence_source, and every later field slid one
+    slot left (the error text was saved as the source and the status blank).
+    """
+    return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", "product page", evidence, status, "", item_id, "", "Unknown", 0, ""
+
+
 def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = ()) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
     except BotChallengeDetected as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", str(exc), "blocked", "", "", item_id, "", "Unknown", 0, ""
+        return _failed_scan(item_id, "blocked", str(exc))
     except HTTPError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"HTTP {exc.code}", "error", "", "", item_id, "", "Unknown", 0, ""
+        return _failed_scan(item_id, "error", f"HTTP {exc.code}")
     except URLError as exc:
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Network error: {exc.reason}", "error", "", "", item_id, "", "Unknown", 0, ""
+        return _failed_scan(item_id, "error", f"Network error: {exc.reason}")
     except Exception as exc:  # pragma: no cover
-        return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", f"Unexpected error: {exc}", "error", "", "", item_id, "", "Unknown", 0, ""
+        return _failed_scan(item_id, "error", f"Unexpected error: {exc}")
 
     image_url = extract_image_url(product_html)
     price_text = extract_price_text(product_html)
