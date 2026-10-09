@@ -6,6 +6,9 @@ against a workbook of compliance monitoring keywords.
 ## Files
 
 - `marketplace_prescreener.py` — main FastAPI app (SQLite-backed prescreening workflow).
+- `ui_shell.py` + `static/ui.css` — page shell (sidebar, header, light/dark theme) styled
+  after ProductWatch's UI. Plain CSS, no Node/build step. Every page renders through
+  `html_page()` → `ui_shell.render_page()`; restyle there, not inline.
 - `search_helper.py` — lightweight FastAPI app that turns workbook keywords into
   ready-to-open Walmart search links (US only).
 - `Consumables_Master.xlsx` — source workbook of keywords per subcategory sheet.

@@ -19,10 +19,12 @@ from urllib.request import Request, urlopen
 
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
+from ui_shell import STATIC_DIR, render_page
 
 APP_TITLE = "Marketplace Country Prescreener"
 USER_AGENT = (
@@ -112,6 +114,7 @@ BOT_CHALLENGE_PATTERNS = [
 
 
 app = FastAPI(title=APP_TITLE)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 lock = threading.RLock()
 JOBS: dict[str, dict] = {}
 LATEST_JOB_ID: str | None = None
@@ -1218,92 +1221,15 @@ document.addEventListener('DOMContentLoaded', restorePrescreenerPrefs);
 """
 
 
-def html_page(title: str, body: str, extra_script: str = "") -> HTMLResponse:    return HTMLResponse(
-        f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html_escape(title)}</title>
-  <style>
-    :root {{
-      --bg: #f7f8fa; --panel: #ffffff; --border: #d8dee9; --text: #102133; --muted: #5e6b7a; --accent: #1f4e78;
-      --ok: #e2f0d9; --warn: #fff2cc; --bad: #f4cccc;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }}
-    header {{ background: linear-gradient(135deg, var(--accent), #2c6aa0); color: white; padding: 20px 24px; }}
-    header h1 {{ margin: 0 0 6px 0; font-size: 22px; }}
-    header p {{ margin: 0; color: rgba(255,255,255,.92); }}
-    main {{ padding: 20px; max-width: 1450px; margin: 0 auto; }}
-    .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.04); padding: 16px; margin-bottom: 16px; }}
-    .grid {{ display: grid; grid-template-columns: 1.5fr .6fr .4fr; gap: 12px; }}
-    label {{ display:block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }}
-    textarea, input, select {{ width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; }}
-    textarea {{ min-height: 120px; resize: vertical; }}
-    button, a.button {{ padding: 10px 14px; border: 0; border-radius: 10px; background: var(--accent); color: white; font-weight: 700; cursor: pointer; text-decoration: none; display:inline-block; }}
-    .secondary {{ background: #6b7280; }}
-    .muted {{ color: var(--muted); font-size: 13px; line-height: 1.5; }}
-    .summary {{ display:flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }}
-    .pill {{ background: #eef3f8; border: 1px solid var(--border); border-radius: 999px; padding: 6px 10px; font-size: 13px; }}
-    .status {{ padding: 10px 12px; border-radius: 10px; background: #eef3f8; border: 1px solid var(--border); margin: 10px 0; }}
-    .bar {{ height: 10px; background: #e9eef5; border-radius: 999px; overflow:hidden; margin: 10px 0 12px; }}
-    .bar > div {{ height:100%; width: 22%; background: linear-gradient(90deg, #1f4e78, #2c6aa0); border-radius: 999px; animation: slide 1.1s linear infinite; }}
-    @keyframes slide {{ 0% {{ transform: translateX(-140%); }} 100% {{ transform: translateX(580%); }} }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
-    th, td {{ padding: 10px 8px; border-bottom: 1px solid var(--border); vertical-align: top; text-align: left; }}
-    th {{ color: var(--muted); font-size: 13px; }}
-    td a {{ color: #0b63ce; text-decoration: none; }}
-    td a:hover {{ text-decoration: underline; }}
-    .badge {{ display:inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); }}
-    .match {{ background: var(--ok); }} .unknown {{ background: var(--warn); }} .error {{ background: var(--bad); }}
-    .counterfeit-flag {{ background: #fecaca; border-color: #dc2626; color: #7f1d1d; font-weight: 700; }}
-    .logbox {{ background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 10px; max-height: 240px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.45; }}
-    .row-actions {{ display:flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }}
-    .top-actions {{ display:flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }}
-    .toolbar {{ display:flex; gap: 8px; flex-wrap: wrap; align-items:end; }}
-    .table-actions {{ display:flex; gap: 8px; flex-wrap: wrap; }}
-    .group-row td {{ background: #f8fbff; }}
-    .keyword-row td {{ background: #fcfdff; }}
-    .group-item {{ transition: opacity 0.15s ease; }}
-    .group-toggle {{ padding: 6px 10px; font-size: 12px; margin-right: 10px; }}
-    .tiny {{ font-size: 12px; color: var(--muted); }}
-    .table-scroll {{ overflow-x: auto; overflow-y: auto; max-height: 430px; border: 1px solid var(--border); border-radius: 8px; }}
-    .table-scroll table {{ margin-top: 0; }}
-    .table-scroll table[data-resizable] thead th {{ position: sticky; top: 0; background: var(--panel); z-index: 1; box-shadow: 0 1px 0 var(--border); }}
-    table[data-resizable] {{ table-layout: fixed; }}
-    table[data-resizable] th {{ position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 16px; }}
-    .col-resize-handle {{ position: absolute; top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }}
-    .col-resize-handle:hover, .col-resize-handle.active {{ background: rgba(31,78,120,.35); }}
-    .thumb-link img.thumb-image {{ width: 56px; height: 56px; object-fit: contain; border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 2px; cursor: zoom-in; }}
-    .thumb-preview {{ display: none; position: fixed; z-index: 999; width: 300px; height: 300px; background: #fff; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.2); padding: 8px; pointer-events: none; }}
-    .thumb-preview img {{ width: 100%; height: 100%; object-fit: contain; }}
-    details summary {{ cursor: pointer; font-weight: 600; }}
-    details summary::-webkit-details-marker {{ color: var(--accent); }}
-    .settings-accordion {{ }}
-    .settings-toggle {{ list-style: none; display: inline-block; width: auto; }}
-    .settings-toggle::-webkit-details-marker {{ display: none; }}
-    .settings-toggle::marker {{ content: ''; }}
-    .settings-toggle::before {{ content: ' '; }}
-    @media (max-width: 900px) {{ .grid {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-{body}
-<script>{extra_script}</script>
-</body>
-</html>"""
-    )
+def html_page(title: str, body: str, extra_script: str = "", *, active: str = "", subtitle: str = "") -> HTMLResponse:
+    """All pages render through the ProductWatch-style shell (ui_shell.py + static/ui.css)."""
+    return render_page(title, body, active=active, subtitle=subtitle, extra_script=extra_script,
+                       latest_job_id=LATEST_JOB_ID, doc_title=APP_TITLE)
 
 
 @app.get("/", response_class=HTMLResponse)
 def home() -> HTMLResponse:
     body = f"""
-<header>
-  <h1>{html_escape(APP_TITLE)}</h1>
-  <p>Best-effort listing prescreening for seller-country signals. If the country is not explicit, the tool says unknown. No fortune-telling.</p>
-</header>
-<main>
   <div class="card">
     <form action="/scan" method="get">
       <div class="grid" style="grid-template-columns: 1fr;">
@@ -1407,9 +1333,9 @@ def home() -> HTMLResponse:
       Your <strong>Market</strong>, <strong>Target country</strong>, and <strong>Search by</strong> choices are remembered in this browser between visits.
     </p>
   </div>
-</main>
 """
-    return html_page(APP_TITLE, body, SEARCH_FORM_SCRIPT)
+    return html_page("New scan", body, SEARCH_FORM_SCRIPT, active="scan",
+                     subtitle="Best-effort listing prescreening for seller-country signals. If the country is not explicit, the tool says unknown.")
 
 
 @app.get("/scan", response_class=HTMLResponse)
@@ -1449,11 +1375,6 @@ def scan(
 @app.get("/job/{job_id}", response_class=HTMLResponse)
 def job_page(job_id: str) -> HTMLResponse:
     body = f"""
-<header>
-  <h1>{html_escape(APP_TITLE)}</h1>
-  <p>Live scan progress — this page updates itself while the job runs.</p>
-</header>
-<main>
   <div class="card">
     <div class="summary">
       <span class="pill" id="job-id">Job: {html_escape(job_id)}</span>
@@ -1481,11 +1402,11 @@ def job_page(job_id: str) -> HTMLResponse:
       <a class="button secondary" href="/export.xlsx?job={html_escape(job_id)}">Export queue</a>
       <a class="button secondary" href="/">New scan</a>
     </div>
-    <div class="card" style="margin:0; background:#f9fbff;">
+    <div class="card inset" style="margin:0;">
       <div><strong>Live log</strong></div>
       <div id="job-logs" class="logbox"></div>
     </div>
-    <div class="card" style="margin-top:16px; background:#fff;">
+    <div class="card" style="margin-top:16px;">
       <div><strong>Latest scan rows</strong> <span class="tiny">Most recent scan results, split by country signal</span></div>
       <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-weight:600;">
         <input id="matches-only-toggle" type="checkbox" checked style="width:auto;">
@@ -1535,11 +1456,11 @@ def job_page(job_id: str) -> HTMLResponse:
         </div>
       </details>
     </div>
-    <div class="card" style="margin-top:16px; background:#fff;">
+    <div class="card" style="margin-top:16px;">
       <div class="toolbar">
         <div class="tiny">All scanned listings are split into China, US, and Unknown sections. Unknown should mean genuinely unclear.</div>
       </div>
-      <div class="card" style="margin: 0 0 12px 0; padding: 12px; background:#f9fbff;">
+      <div class="card inset" style="margin: 0 0 12px 0; padding: 12px;">
         <div class="grid" style="grid-template-columns: 1.3fr .8fr .8fr; align-items:end;">
           <div>
             <label for="filter-text">Filter text</label>
@@ -1604,7 +1525,6 @@ def job_page(job_id: str) -> HTMLResponse:
       </table>
     </div>
   </div>
-</main>
 """
     extra_script = """
 const jobId = __JOB_ID__;
@@ -1840,7 +1760,8 @@ initThumbPreview();
 """
     extra_script = RESIZABLE_TABLE_SCRIPT + THUMB_PREVIEW_SCRIPT + extra_script
     extra_script = extra_script.replace('__JOB_ID__', json.dumps(job_id))
-    return html_page(APP_TITLE, body, extra_script)
+    return html_page("Live scan", body, extra_script, active="job",
+                     subtitle="This page updates itself while the job runs.")
 
 
 
@@ -1906,18 +1827,24 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     rows = get_reviews(state, country_signal, job_id=job_filter)
     state_counts = {s: len(get_reviews(s, country_signal, job_id=job_filter)) for s in ["pending", "approved", "rejected", "not_queued"]}
     country_counts = {c: len(get_reviews(state, c, job_id=job_filter)) for c in ["China", "US", "Unknown", "all"]}
+    def _filter_link(href: str, label: str, is_current: bool) -> str:
+        current = ' active" aria-current="true' if is_current else ""
+        return f'<a class="button secondary{current}" href="{href}">{label}</a>'
+
     state_links = "".join(
-        f'<a class="button secondary" href="/queue?state={s}&country_signal={country_signal}&job={job}">{s.title()} ({state_counts[s]})</a>' for s in state_counts
+        _filter_link(f"/queue?state={s}&country_signal={country_signal}&job={job}", f"{s.replace('_', ' ').title()} ({state_counts[s]})", s == state)
+        for s in state_counts
     )
     country_links = "".join(
-        f'<a class="button secondary" href="/queue?state={state}&country_signal={c}&job={job}">{c.title()} ({country_counts[c]})</a>' for c in ["China", "US", "Unknown", "all"]
+        _filter_link(f"/queue?state={state}&country_signal={c}&job={job}", f"{c if c.isupper() else c.title()} ({country_counts[c]})", c == country_signal)
+        for c in ["China", "US", "Unknown", "all"]
     )
     table_rows = []
     return_to = quote_plus(f"/queue?state={state}&country_signal={country_signal}&job={job}")
     for row in rows:
         actions = (
-            f"<a class='button' href='/review/{row['id']}/approve?return_to={return_to}'>Approve</a>"
-            f"<a class='button secondary' href='/review/{row['id']}/reject?return_to={return_to}'>Reject</a>"
+            f"<a class='button success' href='/review/{row['id']}/approve?return_to={return_to}'>Approve</a>"
+            f"<a class='button destructive' href='/review/{row['id']}/reject?return_to={return_to}'>Reject</a>"
         )
         table_rows.append(
             "<tr>"
@@ -1940,11 +1867,6 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     if not table_rows:
         table_rows.append("<tr><td colspan='14' class='muted'>No items in this queue view.</td></tr>")
     body = f"""
-<header>
-  <h1>{html_escape(APP_TITLE)}</h1>
-  <p>Manual review queue. Approve or reject prescreened listings, then export the evidence.</p>
-</header>
-<main>
   <div class="card">
     <div class="top-actions">
       <a class="button" href="/">New scan</a>
@@ -1971,9 +1893,9 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       </tbody>
     </table>
   </div>
-</main>
 """
-    return html_page(APP_TITLE, body, RESIZABLE_TABLE_SCRIPT + "initResizableTables();")
+    return html_page("Review queue", body, RESIZABLE_TABLE_SCRIPT + "initResizableTables();", active="queue",
+                     subtitle="Approve or reject prescreened listings, then export the evidence.")
 
 
 @app.get("/review/{record_id}/{action}")
