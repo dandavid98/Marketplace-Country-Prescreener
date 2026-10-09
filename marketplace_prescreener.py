@@ -433,6 +433,23 @@ def term_matches_listing(
     return keyword_matches_listing(term, title, description, match_description)
 
 
+def find_excluded_term(title: str, negative_terms: list[str] | tuple[str, ...]) -> str:
+    """Return the first negative term found in the listing title, or "" if none.
+
+    Words match at a word START, so 'tool' catches tool / tools / toolkit but
+    not 'stool'. A multi-word term ('scraper blade') needs every word present,
+    mirroring how positive keywords match. \\w keeps accented ca/mx/cl titles intact.
+    """
+    if not title:
+        return ""
+    text = title.lower()
+    for term in negative_terms:
+        words = re.findall(r"\w+", term.lower())
+        if words and all(re.search(rf"(?<!\w){re.escape(w)}", text) for w in words):
+            return term
+    return ""
+
+
 COUNTRY_HINTS: dict[str, list[re.Pattern[str]]] = {
     "China": [
         re.compile(r"(?:ships?|shipping|ship to|seller(?:\s+location)?|seller address|address|location|country of origin|based in)\s*[:\-]?\s*[^<>{}\n]{0,180}\b(?:china|cn)\b", re.I),
@@ -710,7 +727,7 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None) -> str:
     global LATEST_JOB_ID
     job_id = uuid.uuid4().hex[:10]
     market_obj = get_market(market)
@@ -728,15 +745,17 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "max_price": max_price,
         "price_only": bool(price_only and max_price is not None),
         "match_description": match_description,
+        "negative_terms": list(negative_terms or []),
         "counterfeit_min": counterfeit_min,
         "status": "running",
         "message": "Queued",
         "current": 0,
         "total": max(len(keywords), 1),
-        "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."] ,
+        "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."]
+                + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else []),
         "results": [],
         "scanned": [],
-        "stats": {"scanned_total": 0, "results_total": 0, "china_total": 0, "us_total": 0, "unknown_total": 0},
+        "stats": {"scanned_total": 0, "results_total": 0, "china_total": 0, "us_total": 0, "unknown_total": 0, "excluded_total": 0},
         "stop_requested": False,
         "keyword_progress": {},
         "seen_urls": [],
@@ -756,7 +775,7 @@ def append_log(job: dict, message: str) -> None:
             del job["logs"][: len(job["logs"]) - MAX_LIVE_LOGS]
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = ()) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
@@ -776,6 +795,14 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     title = page_title(product_html, fallback=listing_url.rsplit("/", 1)[-1])
     description = extract_description(product_html)
     listing_brand = extract_listing_brand(product_html)
+
+    # Negative keywords: a title hit means the listing is out, full stop. Bail
+    # before the seller-page and review fetches so excluded listings cost no
+    # extra requests.
+    excluded_by = find_excluded_term(title, negative_terms)
+    if excluded_by:
+        evidence = f"Title contains excluded term {excluded_by!r}"
+        return "Unknown", title, description, "", "Unknown", "Unknown", "Unknown", "title", evidence, "excluded", "", item_id, image_url, price_text, 0, listing_brand
 
     # Sold-and-shipped-by-Walmart listings carry zero third-party/China
     # marketplace risk. Skip the seller-page lookup entirely for these --
@@ -836,9 +863,9 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE) -> tuple[ListingRecord, str]:
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = ()) -> tuple[ListingRecord, str]:
     market = market or MARKETS[DEFAULT_MARKET]
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type)
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -881,6 +908,7 @@ def run_job(job_id: str) -> None:
     max_price = job.get("max_price")
     price_only = bool(job.get("price_only") and max_price is not None)
     match_description = bool(job.get("match_description"))
+    negative_terms = tuple(job.get("negative_terms") or ())
     counterfeit_min = job.get("counterfeit_min")
     worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
     if mode == "fast":
@@ -969,7 +997,7 @@ def run_job(job_id: str) -> None:
                 # in "stopping" forever (Resume button never appeared).
                 pool = ThreadPoolExecutor(max_workers=worker_count)
                 futures = {
-                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type): listing_url
+                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms): listing_url
                     for listing_url in new_urls
                 }
                 completed_urls: set[str] = set()
@@ -988,10 +1016,10 @@ def run_job(job_id: str) -> None:
                             job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
                         record.job_id = job_id
                         keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description)
-                        if status == "walmart_sold":
+                        if status in ("walmart_sold", "excluded"):
                             # Sold-and-shipped-by-Walmart carries zero third-party
-                            # risk by definition -- never let price/counterfeit
-                            # promotion logic flip it to a match.
+                            # risk, and excluded titles were filtered out on purpose:
+                            # never let price/counterfeit promotion flip either to a match.
                             pass
                         elif status in ("match", "unknown") and max_price is not None:
                             price_ok = record.price_value is not None and record.price_value <= max_price
@@ -1001,7 +1029,7 @@ def run_job(job_id: str) -> None:
                                 status = "unknown"
                             record.scan_status = status
                             record.review_state = "pending" if status == "match" else "not_queued"
-                        if status not in ("match", "walmart_sold") and keyword_ok and counterfeit_min is not None and record.counterfeit_review_count >= counterfeit_min:
+                        if status not in ("match", "walmart_sold", "excluded") and keyword_ok and counterfeit_min is not None and record.counterfeit_review_count >= counterfeit_min:
                             status = "match"
                             record.scan_status = status
                             record.review_state = "pending"
@@ -1009,8 +1037,12 @@ def run_job(job_id: str) -> None:
                         with lock:
                             stats = job["stats"]
                             stats["scanned_total"] += 1
-                            signal_key = {"China": "china_total", "US": "us_total"}.get(record.country_signal, "unknown_total")
-                            stats[signal_key] += 1
+                            if status == "excluded":
+                                # filtered out on purpose; don't let them inflate the Unknown count
+                                stats["excluded_total"] += 1
+                            else:
+                                signal_key = {"China": "china_total", "US": "us_total"}.get(record.country_signal, "unknown_total")
+                                stats[signal_key] += 1
                             job["scanned"].append(asdict(record))
                             if len(job["scanned"]) > MAX_LIVE_SCANNED:
                                 del job["scanned"][: len(job["scanned"]) - MAX_LIVE_SCANNED]
@@ -1246,6 +1278,9 @@ def home() -> HTMLResponse:
           <label for="keywords" id="keywords-label">Keywords</label>
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
           <p class="tiny" id="keywords-hint">One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.</p>
+          <label for="negative_keywords" style="margin-top:12px;">Exclude titles containing <span class="tiny">(optional)</span></label>
+          <textarea id="negative_keywords" name="negative_keywords" style="min-height:72px;" aria-describedby="negative-hint" placeholder="Example:\ntool\nrefill"></textarea>
+          <p class="tiny" id="negative-hint">One per line (or comma-separated). Any listing whose title contains one of these is skipped, even if it matches a keyword. Matches word starts, so &ldquo;tool&rdquo; also drops &ldquo;tools&rdquo; and &ldquo;toolkit&rdquo; but not &ldquo;stool&rdquo;. Applies to Listing Brand searches too.</p>
         </div>
       </div>
         <div class="grid" style="margin-top:12px;">
@@ -1351,6 +1386,7 @@ def scan(
     price_only: bool = Query(default=False),
     match_description: bool = Query(default=False),
     counterfeit_min: str = Query(default=""),
+    negative_keywords: str = Query(default=""),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
@@ -1367,7 +1403,7 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type)
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords))
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1384,6 +1420,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="china-count">China signal: 0</span>
       <span class="pill" id="us-count">US / explicit non-China signal: 0</span>
       <span class="pill" id="unknown-count">Unknown signal: 0</span>
+      <span class="pill" id="excluded-count" hidden>Excluded by title: 0</span>
     </div>
     <div class="status">
       <div><strong>What the app is doing right now</strong></div>
@@ -1474,6 +1511,7 @@ def job_page(job_id: str) -> HTMLResponse:
               <option value="unknown">Unknown</option>
               <option value="error">Error</option>
               <option value="blocked">Blocked</option>
+              <option value="excluded">Excluded</option>
             </select>
           </div>
           <div>
@@ -1655,6 +1693,10 @@ async function refreshJob() {
   document.getElementById('china-count').textContent = `China signal: ${stats.china_total || 0}`;
   document.getElementById('us-count').textContent = `US / explicit non-China signal: ${stats.us_total || 0}`;
   document.getElementById('unknown-count').textContent = `Unknown signal: ${stats.unknown_total || 0}`;
+  const excludedPill = document.getElementById('excluded-count');
+  excludedPill.hidden = !(data.negative_terms && data.negative_terms.length);
+  excludedPill.textContent = `Excluded by title: ${stats.excluded_total || 0}`;
+  excludedPill.title = 'Excluded terms: ' + (data.negative_terms || []).join(', ');
   const latestChinaBody = document.getElementById('latest-china-body');
   if (latestChinaBody) {
     function renderLatestRows(rows) {

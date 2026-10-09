@@ -221,7 +221,8 @@ button:hover, a.button:hover, .button:hover { background: color-mix(in oklab, va
 .badge.match { border-color: transparent; background: color-mix(in oklab, var(--success) 10%, transparent); color: var(--success-text); }
 .badge.unknown { border-color: transparent; background: color-mix(in oklab, var(--warning) 12%, transparent); color: var(--warning-text); }
 .badge.error, .badge.blocked { border-color: transparent; background: color-mix(in oklab, var(--destructive) 10%, transparent); color: var(--destructive-text); }
-.badge.walmart_sold { border-color: transparent; background: var(--secondary); color: var(--secondary-foreground); }
+.badge.walmart_sold, .badge.excluded { border-color: transparent; background: var(--secondary); color: var(--secondary-foreground); }
+.badge.excluded { text-decoration: line-through; }
 .badge.counterfeit-flag {
   background: color-mix(in oklab, var(--destructive) 12%, transparent); color: var(--destructive-text);
   border-color: color-mix(in oklab, var(--destructive) 35%, transparent); font-weight: 700;
