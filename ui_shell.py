@@ -37,10 +37,10 @@ def icon(name: str, extra_class: str = "") -> str:
     return f'<svg class="{cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">{_ICONS[name]}</svg>'
 
 
-def _css_version() -> str:
-    """Cache-buster so browsers pick up ui.css edits without a hard refresh."""
+def _asset_version(name: str) -> str:
+    """Cache-buster so browsers pick up static edits without a hard refresh."""
     try:
-        return str(int((STATIC_DIR / "ui.css").stat().st_mtime))
+        return str(int((STATIC_DIR / name).stat().st_mtime))
     except OSError:
         return "0"
 
@@ -136,9 +136,14 @@ def render_page(
     extra_script: str = "",
     latest_job_id: str | None = None,
     doc_title: str = "Marketplace Country Prescreener",
+    scripts: tuple[str, ...] = (),
 ) -> HTMLResponse:
-    """Wrap page `body` in the ProductWatch-style shell."""
+    """Wrap page `body` in the ProductWatch-style shell.
+
+    `scripts`: files in static/ to load (in order) before `extra_script` runs.
+    """
     sub = f'<p class="page-subtitle">{html_escape(subtitle)}</p>' if subtitle else ""
+    script_tags = "".join(f'<script src="/static/{name}?v={_asset_version(name)}"></script>' for name in scripts)
     return HTMLResponse(f"""<!doctype html>
 <html lang="en">
 <head>
@@ -146,7 +151,7 @@ def render_page(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{html_escape(page_title)} · {html_escape(doc_title)}</title>
   <script>{_PRE_PAINT}</script>
-  <link rel="stylesheet" href="/static/ui.css?v={_css_version()}">
+  <link rel="stylesheet" href="/static/ui.css?v={_asset_version('ui.css')}">
 </head>
 <body>
 <div class="shell">
@@ -160,6 +165,7 @@ def render_page(
   </div>
 </div>
 <script>{_SHELL_SCRIPT}</script>
+{script_tags}
 <script>{extra_script}</script>
 </body>
 </html>""")

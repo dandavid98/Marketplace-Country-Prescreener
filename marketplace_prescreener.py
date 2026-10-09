@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 from fastapi import FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
@@ -114,6 +115,7 @@ BOT_CHALLENGE_PATTERNS = [
 
 
 app = FastAPI(title=APP_TITLE)
+app.add_middleware(GZipMiddleware, minimum_size=1024)  # queue JSON can be several MB
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 lock = threading.RLock()
 JOBS: dict[str, dict] = {}
@@ -670,26 +672,28 @@ def save_record(record: ListingRecord) -> int:
         return int(cur.lastrowid)
 
 
-def get_reviews(review_state: str | None = None, country_signal: str | None = None, job_id: str | None = None) -> list[dict]:
-    sql = "select * from reviews"
+def _review_filters(review_state: str | None, country_signal: str | None, job_id: str | None) -> tuple[str, list[str]]:
     clauses: list[str] = []
     params: list[str] = []
-    if review_state and review_state != "all":
-        clauses.append("review_state = ?")
-        params.append(review_state)
-    if country_signal and country_signal != "all":
-        clauses.append("country_signal = ?")
-        params.append(country_signal)
-    if job_id and job_id != "all":
-        clauses.append("job_id = ?")
-        params.append(job_id)
-    if clauses:
-        sql += " where " + " and ".join(clauses)
-    sql += " order by id desc"
+    for column, value in (("review_state", review_state), ("country_signal", country_signal), ("job_id", job_id)):
+        if value and value != "all":
+            clauses.append(f"{column} = ?")
+            params.append(value)
+    return (" where " + " and ".join(clauses)) if clauses else "", params
+
+
+def get_reviews(review_state: str | None = None, country_signal: str | None = None, job_id: str | None = None) -> list[dict]:
+    where, params = _review_filters(review_state, country_signal, job_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(f"select * from reviews{where} order by id desc", params).fetchall()
     return [dict(row) for row in rows]
+
+
+def count_reviews(review_state: str | None = None, country_signal: str | None = None, job_id: str | None = None) -> int:
+    where, params = _review_filters(review_state, country_signal, job_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        return conn.execute(f"select count(*) from reviews{where}", params).fetchone()[0]
 
 
 def update_review_state(record_id: int, review_state: str) -> None:
@@ -1274,10 +1278,10 @@ document.addEventListener('DOMContentLoaded', restorePrescreenerPrefs);
 """
 
 
-def html_page(title: str, body: str, extra_script: str = "", *, active: str = "", subtitle: str = "") -> HTMLResponse:
+def html_page(title: str, body: str, extra_script: str = "", *, active: str = "", subtitle: str = "", scripts: tuple[str, ...] = ()) -> HTMLResponse:
     """All pages render through the ProductWatch-style shell (ui_shell.py + static/ui.css)."""
     return render_page(title, body, active=active, subtitle=subtitle, extra_script=extra_script,
-                       latest_job_id=LATEST_JOB_ID, doc_title=APP_TITLE)
+                       latest_job_id=LATEST_JOB_ID, doc_title=APP_TITLE, scripts=scripts)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1472,45 +1476,18 @@ def job_page(job_id: str) -> HTMLResponse:
       </label>
       <div class="tiny" id="latest-china-count" style="margin-top:8px;">China: 0</div>
       <div class="table-scroll">
-        <table id="latest-china-table" data-resizable>
-          <thead>
-            <tr>
-              <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="latest-china-body">
-            <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
-          </tbody>
-        </table>
+        <table id="latest-china-table"></table>
       </div>
       <details style="margin-top:14px;">
         <summary class="tiny" id="latest-us-count">US signal: 0</summary>
         <div class="table-scroll" style="margin-top:8px;">
-          <table id="latest-us-table" data-resizable>
-            <thead>
-              <tr>
-                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="latest-us-body">
-              <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
-            </tbody>
-          </table>
+          <table id="latest-us-table"></table>
         </div>
       </details>
       <details style="margin-top:10px;">
         <summary class="tiny" id="latest-unknown-count">Unknown signal: 0</summary>
         <div class="table-scroll" style="margin-top:8px;">
-          <table id="latest-unknown-table" data-resizable>
-            <thead>
-              <tr>
-                <th>Item ID</th><th>Image</th><th>Price</th><th>Keyword</th><th>Title</th><th>Seller</th><th>Country</th><th>Counterfeit Reviews</th><th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="latest-unknown-body">
-              <tr><td colspan="9" class="muted">Waiting for listing data...</td></tr>
-            </tbody>
-          </table>
+          <table id="latest-unknown-table"></table>
         </div>
       </details>
     </div>
@@ -1681,6 +1658,12 @@ function wireGroupToggles(scope) {
     };
   });
 }
+const latestTables = {};
+['china', 'us', 'unknown'].forEach(key => {
+  latestTables[key] = ListingTable.create(document.getElementById(`latest-${key}-table`), {
+    pageSize: 50, storageKey: `prescreener_latest_${key}`, emptyText: () => (document.getElementById('matches-only-toggle') || {}).checked === false ? 'No scan rows yet.' : 'No confirmed matches yet.',
+  });
+});
 const matchesOnlyToggleEl = document.getElementById('matches-only-toggle');
 if (matchesOnlyToggleEl) {
   matchesOnlyToggleEl.addEventListener('change', refreshJob);
@@ -1718,33 +1701,16 @@ async function refreshJob() {
   excludedPill.hidden = !(data.negative_terms && data.negative_terms.length);
   excludedPill.textContent = `Excluded by title: ${stats.excluded_total || 0}`;
   excludedPill.title = 'Excluded terms: ' + (data.negative_terms || []).join(', ');
-  const latestChinaBody = document.getElementById('latest-china-body');
-  if (latestChinaBody) {
-    function renderLatestRows(rows) {
-      const visible = matchesOnly ? rows.filter(r => (r.scan_status || 'unknown') === 'match') : rows;
-      return visible.slice(-20).map(r => `
-      <tr>
-        <td>${escapeHtml(r.item_id || '')}</td>
-        <td>${r.image_url ? '<a class="thumb-link" href="' + escapeHtml(r.image_url) + '" target="_blank" rel="noopener noreferrer" data-preview-src="' + escapeHtml(r.image_url) + '"><img class="thumb-image" src="' + escapeHtml(r.image_url) + '" alt="Listing image"></a>' : 'Unknown'}</td>
-        <td>${escapeHtml(r.price_text || (r.price_value != null ? '$' + Number(r.price_value).toFixed(2) : 'Unknown'))}</td>
-        <td>${escapeHtml(r.keyword || '')}</td>
-        <td><a href="${escapeHtml(r.listing_url || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || r.listing_url || '')}</a></td>
-        <td>${r.seller_page_url ? `<a href="${escapeHtml(r.seller_page_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.seller_id || 'Unknown')}</a>` : escapeHtml(r.seller_id || 'Unknown')}</td>
-        <td>${escapeHtml(r.country_signal || 'Unknown')}</td>
-        <td>${r.counterfeit_review_count ? `<span class="badge counterfeit-flag">${escapeHtml(String(r.counterfeit_review_count))}</span>` : '0'}</td>
-        <td><span class="badge ${escapeHtml(r.scan_status || 'unknown')}">${escapeHtml(r.scan_status || 'unknown')}</span></td>
-      </tr>`).join('') || `<tr><td colspan="9" class="muted">${matchesOnly ? 'No confirmed matches yet.' : 'No scan rows yet.'}</td></tr>`;
-    }
-    const chinaVisible = matchesOnly ? chinaRows.filter(r => (r.scan_status || 'unknown') === 'match') : chinaRows;
-    const usVisible = matchesOnly ? usRows.filter(r => (r.scan_status || 'unknown') === 'match') : usRows;
-    const unknownVisible = matchesOnly ? unknownRows.filter(r => (r.scan_status || 'unknown') === 'match') : unknownRows;
-    document.getElementById('latest-china-count').textContent = `China: ${chinaVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
-    document.getElementById('latest-us-count').textContent = `US: ${usVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
-    document.getElementById('latest-unknown-count').textContent = `Unknown: ${unknownVisible.length}${matchesOnly ? ' matches' : ' scanned'}`;
-    latestChinaBody.innerHTML = renderLatestRows(chinaRows);
-    document.getElementById('latest-us-body').innerHTML = renderLatestRows(usRows);
-    document.getElementById('latest-unknown-body').innerHTML = renderLatestRows(unknownRows);
-  }
+  const visibleFor = rows => matchesOnly ? rows.filter(r => (r.scan_status || 'unknown') === 'match') : rows;
+  const chinaVisible = visibleFor(chinaRows), usVisible = visibleFor(usRows), unknownVisible = visibleFor(unknownRows);
+  const countSuffix = matchesOnly ? ' matches' : ' scanned';
+  document.getElementById('latest-china-count').textContent = `China: ${chinaVisible.length}${countSuffix}`;
+  document.getElementById('latest-us-count').textContent = `US: ${usVisible.length}${countSuffix}`;
+  document.getElementById('latest-unknown-count').textContent = `Unknown: ${unknownVisible.length}${countSuffix}`;
+  // newest first, like before (rows arrive oldest-first)
+  latestTables.china.setRows(chinaVisible.slice().reverse());
+  latestTables.us.setRows(usVisible.slice().reverse());
+  latestTables.unknown.setRows(unknownVisible.slice().reverse());
   // Update shared state and rerender via the filter table's rerender()
   // (wired ONCE below, outside this polling function) instead of
   // re-attaching input/change listeners on every 1.2s poll. Stacking a
@@ -1823,7 +1789,7 @@ initThumbPreview();
 """
     extra_script = RESIZABLE_TABLE_SCRIPT + THUMB_PREVIEW_SCRIPT + extra_script
     extra_script = extra_script.replace('__JOB_ID__', json.dumps(job_id))
-    return html_page("Live scan", body, extra_script, active="job",
+    return html_page("Live scan", body, extra_script, active="job", scripts=("listing_table.js",),
                      subtitle="This page updates itself while the job runs.")
 
 
@@ -1878,18 +1844,64 @@ def api_job(job_id: str) -> JSONResponse:
     return JSONResponse(payload)
 
 
+QUEUE_ROW_FIELDS = (
+    "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_url",
+    "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
+    "scan_status", "evidence", "review_state",
+)
+
+
+def _queue_scope(job: str) -> str | None:
+    return LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
+
+
+@app.get("/api/queue")
+def api_queue(state: str = Query(default="pending"), country_signal: str = Query(default="China"), job: str = Query(default="latest")) -> JSONResponse:
+    """Rows for the queue table. Only the fields the table shows, to keep big views light."""
+    rows = get_reviews(state, country_signal, job_id=_queue_scope(job))
+    return JSONResponse([{k: row.get(k) for k in QUEUE_ROW_FIELDS} for row in rows])
+
+
+QUEUE_TABLE_SCRIPT = """
+const queueParams = __QUEUE_PARAMS__;
+const esc = ListingTable.escapeHtml;
+const queueTable = ListingTable.create(document.getElementById('queue-table'), {
+  pageSize: 100,
+  storageKey: 'prescreener_queue',
+  emptyText: 'No items in this queue view.',
+  extraColumns: [
+    { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select', value: r => r.review_state || '' },
+    { key: 'actions', label: 'Actions', thClass: 'col-actions', tdClass: 'table-actions', cell: r => {
+        const back = encodeURIComponent(location.pathname + location.search);
+        return `<a class="button success" href="/review/${r.id}/approve?return_to=${back}">Approve</a>` +
+               `<a class="button destructive" href="/review/${r.id}/reject?return_to=${back}">Reject</a>`;
+      } },
+  ],
+});
+document.querySelector('#queue-table tbody').innerHTML = '<tr><td colspan="11" class="muted">Loading queue...</td></tr>';
+fetch('/api/queue?' + new URLSearchParams(queueParams))
+  .then(res => { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
+  .then(rows => queueTable.setRows(rows))
+  .catch(err => {
+    document.querySelector('#queue-table tbody').innerHTML =
+      `<tr><td colspan="11" class="muted">Couldn't load the queue (${esc(err.message)}). Refresh to try again.</td></tr>`;
+  });
+initThumbPreview();
+"""
+
+
 @app.get("/queue", response_class=HTMLResponse)
 def queue_page(state: str = Query(default="pending"), country_signal: str = Query(default="China"), job: str = Query(default="latest")) -> HTMLResponse:
-    job_filter = LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
+    job_filter = _queue_scope(job)
     scope_note = "Showing results from your most recent scan only." if job == "latest" else "Showing results from ALL scans ever run (full history)."
     scope_toggle = (
         f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=all">View all scans (history)</a>'
         if job == "latest" else
         f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=latest">Back to latest scan only</a>'
     )
-    rows = get_reviews(state, country_signal, job_id=job_filter)
-    state_counts = {s: len(get_reviews(s, country_signal, job_id=job_filter)) for s in ["pending", "approved", "rejected", "not_queued"]}
-    country_counts = {c: len(get_reviews(state, c, job_id=job_filter)) for c in ["China", "US", "Unknown", "all"]}
+    state_counts = {s: count_reviews(s, country_signal, job_id=job_filter) for s in ["pending", "approved", "rejected", "not_queued"]}
+    country_counts = {c: count_reviews(state, c, job_id=job_filter) for c in ["China", "US", "Unknown", "all"]}
+
     def _filter_link(href: str, label: str, is_current: bool) -> str:
         current = ' active" aria-current="true' if is_current else ""
         return f'<a class="button secondary{current}" href="{href}">{label}</a>'
@@ -1902,33 +1914,6 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         _filter_link(f"/queue?state={state}&country_signal={c}&job={job}", f"{c if c.isupper() else c.title()} ({country_counts[c]})", c == country_signal)
         for c in ["China", "US", "Unknown", "all"]
     )
-    table_rows = []
-    return_to = quote_plus(f"/queue?state={state}&country_signal={country_signal}&job={job}")
-    for row in rows:
-        actions = (
-            f"<a class='button success' href='/review/{row['id']}/approve?return_to={return_to}'>Approve</a>"
-            f"<a class='button destructive' href='/review/{row['id']}/reject?return_to={return_to}'>Reject</a>"
-        )
-        table_rows.append(
-            "<tr>"
-            f"<td>{row['id']}</td>"
-            f"<td>{html_escape(row['keyword'])}</td>"
-            f"<td>{html_escape(row.get('listing_brand', ''))}</td>"
-            f"<td>{html_escape(row.get('market', DEFAULT_MARKET))}</td>"
-            f"<td><a href='{html_escape(row['listing_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['title'])}</a></td>"
-            f"<td><a href='{html_escape(row['seller_page_url'])}' target='_blank' rel='noopener noreferrer'>{html_escape(row['seller_page_url']) or 'Unknown'}</a></td>"
-            f"<td>{html_escape(row['seller_name'])}</td>"
-            f"<td>{html_escape(row['ship_from_country'])}</td>"
-            f"<td>{html_escape(row['country_signal'])}</td>"
-            f"<td>{html_escape(row['evidence_source'])}</td>"
-            f"<td>{html_escape(row['evidence'])}</td>"
-            f"<td><span class='badge {row['scan_status']}'>{html_escape(row['scan_status'])}</span></td>"
-            f"<td>{html_escape(row['review_state'])}</td>"
-            f"<td class='table-actions'>{actions}</td>"
-            "</tr>"
-        )
-    if not table_rows:
-        table_rows.append("<tr><td colspan='14' class='muted'>No items in this queue view.</td></tr>")
     body = f"""
   <div class="card">
     <div class="top-actions">
@@ -1945,20 +1930,15 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       <div class="tiny" style="width:100%; margin-bottom:6px;">Country view</div>
       {country_links}
     </div>
-    <table data-resizable>
-      <thead>
-        <tr>
-          <th>ID</th><th>Keyword</th><th>Listing Brand</th><th>Market</th><th>Listing</th><th>Seller Page</th><th>Seller</th><th>Ship From</th><th>Country</th><th>Evidence Source</th><th>Evidence</th><th>Status</th><th>Review</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {''.join(table_rows)}
-      </tbody>
-    </table>
+    <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.</p>
+    <div class="table-x"><table id="queue-table"></table></div>
   </div>
 """
-    return html_page("Review queue", body, RESIZABLE_TABLE_SCRIPT + "initResizableTables();", active="queue",
+    params = json.dumps({"state": state, "country_signal": country_signal, "job": job}).replace("</", "<\\/")
+    script = THUMB_PREVIEW_SCRIPT + QUEUE_TABLE_SCRIPT.replace("__QUEUE_PARAMS__", params)
+    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js",),
                      subtitle="Approve or reject prescreened listings, then export the evidence.")
+
 
 
 @app.get("/review/{record_id}/{action}")

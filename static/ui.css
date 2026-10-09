@@ -256,8 +256,6 @@ td { overflow-wrap: anywhere; }
 /* a <td> must stay display:table-cell or it drops out of the row; stack its buttons instead */
 td.table-actions { display: table-cell; white-space: nowrap; }
 td.table-actions .button { display: flex; width: fit-content; margin-bottom: 6px; }
-/* fixed-layout queue table (14 cols): give Approve/Reject a column wide enough to hold them */
-table[data-resizable] thead th:nth-last-child(1):nth-child(14) { width: 104px; }
 th { font-weight: 500; color: var(--muted-foreground); }
 td a { color: var(--link); text-decoration: none; }
 td a:hover { text-decoration: underline; }
@@ -267,11 +265,38 @@ tbody tr:hover td { background: color-mix(in oklab, var(--muted) 50%, transparen
 .group-item { transition: opacity .15s ease; }
 .table-scroll { overflow: auto; max-height: 430px; border: 1px solid var(--border); border-radius: var(--radius); }
 .table-scroll table { margin-top: 0; }
-.table-scroll table[data-resizable] thead th { position: sticky; top: 0; z-index: 1; background: var(--card); box-shadow: 0 1px 0 var(--border); }
+.table-scroll table[data-resizable] thead th, .table-scroll .listing-table thead th { position: sticky; top: 0; z-index: 1; background: var(--card); box-shadow: 0 1px 0 var(--border); }
 table[data-resizable] { table-layout: fixed; }
 table[data-resizable] th { position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 16px; }
 .col-resize-handle { position: absolute; top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }
 .col-resize-handle:hover, .col-resize-handle.active { background: color-mix(in oklab, var(--primary) 35%, transparent); }
+
+/* ---------- listing table (static/listing_table.js): sort + filter row ------------- */
+.listing-table { table-layout: fixed; min-width: 1060px; }
+.listing-table thead th { white-space: normal; vertical-align: bottom; }
+/* every column but Title gets a fixed width; Title takes what's left */
+.listing-table .col-id { width: 96px; }
+.listing-table .col-image { width: 76px; }
+.listing-table .col-price { width: 80px; }
+.listing-table .col-mid { width: 130px; }
+.listing-table .col-short { width: 92px; }
+.listing-table .col-actions { width: 108px; }
+.table-x { overflow-x: auto; }
+.sort-btn {
+  all: unset; display: inline-flex; align-items: center; gap: 4px; max-width: 100%; cursor: pointer;
+  font-weight: 500; color: var(--muted-foreground); border-radius: calc(var(--radius) * .6); overflow-wrap: anywhere;
+}
+.sort-btn:hover { color: var(--foreground); }
+.sort-btn:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+.sort-arrow { opacity: .45; font-size: 12px; }
+th[aria-sort="ascending"] .sort-btn, th[aria-sort="descending"] .sort-btn { color: var(--foreground); }
+th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { opacity: 1; color: var(--link); }
+.filter-row th { padding-top: 0; padding-bottom: 8px; font-weight: 400; }
+.filter-row input, .filter-row select { height: 28px; padding: 2px 8px; font-size: 12px; }
+.table-scroll .listing-table thead tr.filter-row th { top: var(--filter-row-top, 37px); }
+.listing-table tfoot td { border-bottom: 0; }
+.listing-table tfoot .button { height: 26px; margin-left: 8px; font-size: 12px; }
+.listing-table td.table-actions .button { margin-bottom: 6px; }
 
 /* ---------- misc app pieces --------------------------------------------------- */
 .muted { color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
