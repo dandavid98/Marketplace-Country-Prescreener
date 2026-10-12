@@ -228,6 +228,22 @@ button:hover, a.button:hover, .button:hover { background: color-mix(in oklab, va
   border-color: color-mix(in oklab, var(--destructive) 35%, transparent); font-weight: 700;
 }
 .summary { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+/* how a keyword matched: Disguised (circumvention, worth a closer look) / Fuzzy (typo) */
+.badge.kind-disguised { border-color: transparent; background: color-mix(in oklab, var(--destructive) 10%, transparent); color: var(--destructive-text); }
+.badge.kind-fuzzy { border-color: transparent; background: color-mix(in oklab, var(--primary) 10%, transparent); color: var(--primary); }
+
+/* ---------- keyword matching panel (New scan) ------------------------------ */
+.match-panel { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin: 12px 0 0; }
+.match-panel legend { font-size: 14px; font-weight: 600; padding: 0 4px; }
+.match-panel .match-always { font-size: 13px; margin: 0 0 10px; line-height: 1.5; }
+.match-panel .check-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; }
+.match-panel .check-row input { width: auto; }
+.fuzzy-controls { margin: 8px 0 4px; }
+.fuzzy-controls input[type=range] { width: 100%; padding: 0; accent-color: var(--primary); }
+.fuzzy-scale { display: flex; justify-content: space-between; gap: 8px; }
+.match-preview { font-size: 13px; background: var(--muted); border-radius: calc(var(--radius) * .8); padding: 8px 10px; margin-top: 8px; }
+.match-preview ul { margin: 4px 0 6px; padding-left: 18px; }
+.match-preview code { font-weight: 600; }
 
 /* ---------- forms ---------------------------------------------------------- */
 label { display: block; font-size: 14px; font-weight: 500; margin-bottom: 6px; }

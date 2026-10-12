@@ -26,6 +26,7 @@ from openpyxl.utils import get_column_letter
 
 from brand_signals import is_generic_brand
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
+from fuzzy_match import DEFAULT_STRICTNESS, SHORT_WORD_MAX, KeywordMatch, allowed_edits, disguised_spellings, keyword_words, legacy_contains, match_keyword
 from ui_shell import STATIC_DIR, render_page
 
 APP_TITLE = "Marketplace Country Prescreener"
@@ -160,6 +161,7 @@ class ListingRecord:
     market: str = DEFAULT_MARKET
     listing_brand: str = ""
     counterfeit_checked: bool = False
+    match_kind: str = ""   # "" = exact, else "disguised" | "fuzzy"
     id: int | None = None
 
 
@@ -381,27 +383,27 @@ def parse_price_value(price_text: str) -> float | None:
 
 
 def keyword_matches_text(keyword: str, text: str) -> bool:
-    if not text:
-        return False
-    text_lower = text.lower()
-    words = [w for w in re.findall(r"[a-z0-9]+", keyword.lower()) if len(w) > 1]
-    if not words:
-        return True
-    return all(w in text_lower for w in words)
+    """Plain exact keyword-in-text check (no disguise decoding)."""
+    return bool(text) and legacy_contains(keyword, text)
 
 
-def keyword_matches_listing(keyword: str, title: str, description: str, match_description: bool) -> bool:
-    """Match a keyword against the title, optionally also checking the description.
+def find_keyword_match(keyword: str, title: str, description: str, match_description: bool, fuzzy_strictness: int | None = None) -> KeywordMatch | None:
+    """Match a keyword against the title, optionally also the description.
 
-    With match_description off, only the title is checked (original behavior).
-    With it on, a listing counts as a match if EITHER the title OR the description
-    contains all the keyword's significant words.
+    Disguised spellings (F3breze, F.e.b.r.e.z.e, Cyrillic lookalikes ...) are
+    ALWAYS decoded; `fuzzy_strictness` (0-100, None = off) adds typo slack.
+    With match_description on, EITHER the title OR the description may match.
     """
-    if keyword_matches_text(keyword, title):
-        return True
-    if match_description and keyword_matches_text(keyword, description):
-        return True
-    return False
+    found = match_keyword(keyword, title, fuzzy_strictness)
+    if found is None and match_description and description:
+        found = match_keyword(keyword, description, fuzzy_strictness)
+        if found is not None:
+            found = KeywordMatch(found.kind, found.details, "description")
+    return found
+
+
+def keyword_matches_listing(keyword: str, title: str, description: str, match_description: bool, fuzzy_strictness: int | None = None) -> bool:
+    return find_keyword_match(keyword, title, description, match_description, fuzzy_strictness) is not None
 
 
 def brand_matches(target_brand: str, listing_brand: str) -> bool:
@@ -425,19 +427,19 @@ def term_matches_listing(
     listing_brand: str,
     match_description: bool,
     generic_only: bool = False,
+    fuzzy_strictness: int | None = None,
 ) -> bool:
     """Dispatch to the right match rule for the job's search type.
 
-    Keeps `keyword_matches_listing` untouched (still used standalone by
-    keyword-mode jobs); brand-mode jobs get their own exact-match rule via
-    `brand_matches` instead of a text-contains check. `generic_only` (keyword
-    mode only) additionally requires a generic placeholder Brand attribute.
+    Brand-mode jobs use `brand_matches` (exact Brand attribute). Keyword mode
+    always sees through disguises, adds typo slack when `fuzzy_strictness` is
+    set, and with `generic_only` also requires a generic placeholder Brand.
     """
     if search_type == "brand":
         return brand_matches(term, listing_brand)
     if generic_only and not is_generic_brand(listing_brand):
         return False
-    return keyword_matches_listing(term, title, description, match_description)
+    return keyword_matches_listing(term, title, description, match_description, fuzzy_strictness)
 
 
 def find_excluded_term(title: str, negative_terms: list[str] | tuple[str, ...]) -> str:
@@ -614,6 +616,7 @@ def init_db() -> None:
             'market': f"alter table reviews add column market text not null default '{DEFAULT_MARKET}'",
             'listing_brand': "alter table reviews add column listing_brand text not null default ''",
             'counterfeit_checked': "alter table reviews add column counterfeit_checked integer not null default 0",
+            'match_kind': "alter table reviews add column match_kind text not null default ''",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -642,8 +645,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -671,6 +674,7 @@ def save_record(record: ListingRecord) -> int:
                 record.market,
                 record.listing_brand,
                 int(record.counterfeit_checked),
+                record.match_kind,
             ),
         )
         conn.commit()
@@ -714,7 +718,7 @@ def export_reviews_xlsx(job_id: str | None = None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country"]
+    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
     ws.append(headers)
@@ -729,6 +733,7 @@ def export_reviews_xlsx(job_id: str | None = None) -> Path:
             row.get("seller_id", "Unknown"),
             row.get("price_text", ""),
             row.get("country_signal", ""),
+            (row.get("match_kind") or "exact").capitalize(),
         ]
         if any_counterfeit_checked:
             checked = row.get("counterfeit_checked")
@@ -747,12 +752,18 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None, generic_only: bool = False) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None, generic_only: bool = False, fuzzy_strictness: int | None = None, disguised_search: bool = False) -> str:
     global LATEST_JOB_ID
     job_id = uuid.uuid4().hex[:10]
     market_obj = get_market(market)
     search_type = search_type if search_type in ("keyword", "brand") else DEFAULT_SEARCH_TYPE
     generic_only = bool(generic_only and search_type == "keyword")
+    fuzzy_strictness = fuzzy_strictness if search_type == "keyword" else None
+    # (keyword it reports as, query typed into Walmart search). Disguised
+    # spellings are extra searches whose listings still match the REAL keyword.
+    search_plan = [[kw, kw] for kw in keywords]
+    if disguised_search and search_type == "keyword":
+        search_plan += [[kw, spelling] for kw in keywords for spelling in disguised_spellings(kw)]
     term_label = "listing brand" if search_type == "brand" else "keyword"
     job = {
         "id": job_id,
@@ -768,14 +779,20 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "match_description": match_description,
         "negative_terms": list(negative_terms or []),
         "generic_only": generic_only,
+        "fuzzy_strictness": fuzzy_strictness,
+        "search_plan": search_plan,
+        "disguised_searches": len(search_plan) - len(keywords),
         "counterfeit_min": counterfeit_min,
         "status": "running",
         "message": "Queued",
         "current": 0,
-        "total": max(len(keywords), 1),
+        "total": max(len(search_plan), 1),
         "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."]
                 + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else [])
-                + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...)."] if generic_only else []),
+                + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...)."] if generic_only else [])
+                + (["Disguise detection on: F3breze / F.e.b.r.e.z.e / lookalike letters count as the real keyword."] if search_type == "keyword" else [])
+                + ([f"Fuzzy matching on at strictness {fuzzy_strictness}: " + "; ".join(f"{w} allows {allowed_edits(w, fuzzy_strictness)} letter difference(s)" for kw in keywords for w in keyword_words(kw))] if fuzzy_strictness is not None else [])
+                + (["Also searching disguised spellings: " + ", ".join(q for kw, q in search_plan if q != kw)] if len(search_plan) > len(keywords) else []),
         "results": [],
         "scanned": [],
         "stats": {"scanned_total": 0, "results_total": 0, "china_total": 0, "us_total": 0, "unknown_total": 0, "excluded_total": 0},
@@ -808,7 +825,7 @@ def _failed_scan(item_id: str, status: str, evidence: str) -> tuple[str, str, st
     return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", "product page", evidence, status, "", item_id, "", "Unknown", 0, ""
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
@@ -878,7 +895,7 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
 
     if seller_name == "Unknown" and seller_page_title:
         seller_name = seller_page_title
-    keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description, generic_only)
+    keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description, generic_only, fuzzy_strictness)
     # "Any" target country means no country filter -- every listing is
     # country-eligible regardless of what extract_signals found, so status
     # depends purely on keyword_ok (or brand_ok). Otherwise, require an
@@ -893,14 +910,19 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
                 evidence = f"{evidence} (listing brand {listing_brand or 'none'!r} is not a generic brand, treating as non-match)"
             else:
                 where = "title or description" if match_description else "title"
-                evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
+                slack = f" or with up to the allowed letter differences (strictness {fuzzy_strictness})" if fuzzy_strictness is not None else ""
+                evidence = f"{evidence} (keyword {keyword!r} not found in {where}, not even disguised{slack}, treating as non-match)"
     status = "match" if (country_ok and keyword_ok) else "unknown"
     return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False) -> tuple[ListingRecord, str]:
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None) -> tuple[ListingRecord, str]:
     market = market or MARKETS[DEFAULT_MARKET]
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms, generic_only)
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms, generic_only, fuzzy_strictness)
+    found = find_keyword_match(keyword, title, description, match_description, fuzzy_strictness) if search_type == "keyword" else None
+    match_kind = found.kind if found and found.kind != "exact" else ""
+    if match_kind:
+        evidence = f"{evidence} [{match_kind} match: {found.describe()}]"
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -927,6 +949,7 @@ def scan_listing_job(keyword: str, listing_url: str, target_country: str, search
         market=market.code,
         listing_brand=listing_brand,
         counterfeit_checked=check_counterfeit,
+        match_kind=match_kind,
     )
     return record, status
 
@@ -945,6 +968,8 @@ def run_job(job_id: str) -> None:
     match_description = bool(job.get("match_description"))
     negative_terms = tuple(job.get("negative_terms") or ())
     generic_only = bool(job.get("generic_only"))
+    fuzzy_strictness = job.get("fuzzy_strictness")
+    search_plan = job.get("search_plan") or [[kw, kw] for kw in keywords]
     counterfeit_min = job.get("counterfeit_min")
     worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
     if mode == "fast":
@@ -955,24 +980,24 @@ def run_job(job_id: str) -> None:
     seen_urls: set[str] = set(job.get("seen_urls") or [])
     discovered = len(job.get("scanned") or [])
 
-    def process_keyword(position: int, keyword: str) -> None:
+    def process_keyword(position: int, keyword: str, query: str) -> None:
         nonlocal discovered
         with lock:
             if job.get("stop_requested"):
                 return
-            progress = (job.get("keyword_progress") or {}).get(keyword)
-            job["message"] = f"Searching {market.label} for {keyword!r} ({position}/{len(keywords)})"
+            progress = (job.get("keyword_progress") or {}).get(query)
+            job["message"] = f"Searching {market.label} for {query!r} ({position}/{len(search_plan)})"
         if progress and progress.get("finished"):
-            append_log(job, f"Skipping {keyword!r}: already finished in a previous run.")
+            append_log(job, f"Skipping {query!r}: already finished in a previous run.")
             return
         append_log(job, job["message"])
 
         if progress and progress.get("next_url"):
             current_search_url = progress["next_url"]
             pages_crawled = progress.get("pages_crawled", 0)
-            append_log(job, f"Resuming {keyword!r} from page {pages_crawled + 1}: {current_search_url}")
+            append_log(job, f"Resuming {query!r} from page {pages_crawled + 1}: {current_search_url}")
         else:
-            current_search_url = walmart_search_url(keyword, market)
+            current_search_url = walmart_search_url(query, market)
             pages_crawled = 0
         visited_search_pages: set[str] = set()
         keyword_listing_count = 0
@@ -983,7 +1008,7 @@ def run_job(job_id: str) -> None:
                     job["status"] = "stopped"
                     job["message"] = "Scan stopped by user."
                     job["finished_at"] = utc_now()
-                    job.setdefault("keyword_progress", {})[keyword] = {
+                    job.setdefault("keyword_progress", {})[query] = {
                         "next_url": current_search_url,
                         "pages_crawled": pages_crawled,
                         "finished": False,
@@ -992,23 +1017,23 @@ def run_job(job_id: str) -> None:
                     append_log(job, "User requested stop. Ending scan early.")
                     return
             if page_limit > 0 and pages_crawled >= page_limit:
-                append_log(job, f"Page cap reached for {keyword!r}: {page_limit} page(s).")
+                append_log(job, f"Page cap reached for {query!r}: {page_limit} page(s).")
                 break
             if pages_crawled >= MAX_PAGE_SAFETY:
-                append_log(job, f"Safety cap reached for {keyword!r}: {MAX_PAGE_SAFETY} pages.")
+                append_log(job, f"Safety cap reached for {query!r}: {MAX_PAGE_SAFETY} pages.")
                 break
 
             visited_search_pages.add(current_search_url)
             pages_crawled += 1
-            append_log(job, f"Fetching search page {pages_crawled} for {keyword!r}: {current_search_url}")
+            append_log(job, f"Fetching search page {pages_crawled} for {query!r}: {current_search_url}")
 
             try:
                 search_html = fetch_html(current_search_url)
             except BotChallengeDetected as exc:
-                append_log(job, f"Search page blocked for {keyword!r} on page {pages_crawled}: {exc}")
+                append_log(job, f"Search page blocked for {query!r} on page {pages_crawled}: {exc}")
                 break
             except Exception as exc:
-                append_log(job, f"Search failed for {keyword!r} on page {pages_crawled}: {exc}")
+                append_log(job, f"Search failed for {query!r} on page {pages_crawled}: {exc}")
                 break
 
             page_listing_urls = extract_listing_urls(search_html, market)
@@ -1022,7 +1047,7 @@ def run_job(job_id: str) -> None:
                         seen_urls.add(u)
                         new_urls.append(u)
             if not new_urls:
-                append_log(job, f"No new listings found on page {pages_crawled} for {keyword!r}.")
+                append_log(job, f"No new listings found on page {pages_crawled} for {query!r}.")
             else:
                 worker_count = min(worker_cap, len(new_urls))
                 append_log(job, f"Scanning {len(new_urls)} new listing(s) with {worker_count} worker(s).")
@@ -1033,7 +1058,7 @@ def run_job(job_id: str) -> None:
                 # in "stopping" forever (Resume button never appeared).
                 pool = ThreadPoolExecutor(max_workers=worker_count)
                 futures = {
-                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms, generic_only): listing_url
+                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms, generic_only, fuzzy_strictness): listing_url
                     for listing_url in new_urls
                 }
                 completed_urls: set[str] = set()
@@ -1049,9 +1074,9 @@ def run_job(job_id: str) -> None:
                         with lock:
                             discovered += 1
                             keyword_listing_count += 1
-                            job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
+                            job["message"] = f"Finished scan {discovered} for {query!r} on page {pages_crawled}"
                         record.job_id = job_id
-                        keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description, generic_only)
+                        keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description, generic_only, fuzzy_strictness)
                         if status in ("walmart_sold", "excluded"):
                             # Sold-and-shipped-by-Walmart carries zero third-party
                             # risk, and excluded titles were filtered out on purpose:
@@ -1106,7 +1131,7 @@ def run_job(job_id: str) -> None:
                         job["status"] = "stopped"
                         job["message"] = "Scan stopped by user."
                         job["finished_at"] = utc_now()
-                        job.setdefault("keyword_progress", {})[keyword] = {
+                        job.setdefault("keyword_progress", {})[query] = {
                             "next_url": current_search_url,
                             "pages_crawled": pages_crawled - 1,
                             "finished": False,
@@ -1117,23 +1142,23 @@ def run_job(job_id: str) -> None:
                 pool.shutdown(wait=True)
 
             if not next_search_url or next_search_url in visited_search_pages:
-                append_log(job, f"No more search pages for {keyword!r}.")
+                append_log(job, f"No more search pages for {query!r}.")
                 break
             current_search_url = next_search_url
 
-        append_log(job, f"Finished keyword {keyword!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {job['stats']['results_total']} match(es) so far.")
+        append_log(job, f"Finished keyword {query!r}: crawled {pages_crawled} page(s), inspected {keyword_listing_count} new listing(s), queued {job['stats']['results_total']} match(es) so far.")
         with lock:
             job["current"] = min(job["total"], job.get("current", 0) + 1)
-            job.setdefault("keyword_progress", {})[keyword] = {"next_url": None, "pages_crawled": pages_crawled, "finished": True}
+            job.setdefault("keyword_progress", {})[query] = {"next_url": None, "pages_crawled": pages_crawled, "finished": True}
             job["seen_urls"] = list(seen_urls)
 
     try:
-        keyword_worker_count = min(KEYWORD_WORKERS, len(keywords)) if keywords else 1
+        keyword_worker_count = min(KEYWORD_WORKERS, len(search_plan)) if search_plan else 1
         append_log(job, f"Running up to {keyword_worker_count} keyword search(es) in parallel.")
         with ThreadPoolExecutor(max_workers=keyword_worker_count) as pool:
             futures = {
-                pool.submit(process_keyword, i, keyword): keyword
-                for i, keyword in enumerate(keywords, start=1)
+                pool.submit(process_keyword, i, keyword, query): query
+                for i, (keyword, query) in enumerate(search_plan, start=1)
             }
             for future in as_completed(futures):
                 keyword = futures[future]
@@ -1251,7 +1276,7 @@ function initThumbPreview() {
 }
 """
 
-SEARCH_FORM_SCRIPT = """
+SEARCH_FORM_SCRIPT = r"""
 function updateSearchTypeLabels() {
   var isBrand = document.querySelector('input[name="search_type"]:checked').value === 'brand';
   document.getElementById('keywords-label').textContent = isBrand ? 'Listing Brand(s)' : 'Keywords';
@@ -1262,6 +1287,7 @@ function updateSearchTypeLabels() {
     ? 'One listing brand per line (exact match, case-insensitive). Every listing tagged with that brand is pulled, regardless of what the title says.'
     : 'One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.';
   document.getElementById('generic-only-wrap').hidden = isBrand;
+  document.getElementById('match-options').hidden = isBrand;
 }
 
 function savePrescreenerPref(key, value) {
@@ -1325,6 +1351,31 @@ def home() -> HTMLResponse:
             </label>
             <p class="tiny" id="generic-only-hint">Keyword must be in the title <strong>and</strong> the listing's Brand must be a placeholder like Generic, Unbranded, Unbrand, NOBRAND, No Brand, Unknown, N/A, None, OEM (capitals, spaces and punctuation ignored). Great for broad keywords like &ldquo;febreze&rdquo;.</p>
           </div>
+          <fieldset id="match-options" class="match-panel">
+            <legend>How keywords are matched</legend>
+            <p class="match-always" id="disguise-hint">
+              <span class="badge kind-disguised">Always on</span>
+              <strong>Disguise detection.</strong> Catches sellers hiding the keyword: numbers or symbols for letters (F3breze, Fe8reze, Febr@ze), lookalike letters from other alphabets, accents (F&eacute;br&egrave;ze), dots, dashes or spaces inside the word (F.e.b.r.e.z.e, Feb reze), invisible characters and stretched letters (Febreeeze). Disguises are never counted as typos, so this works whatever the settings below.
+            </p>
+            <label class="check-row">
+              <input id="fuzzy" name="fuzzy" type="checkbox" value="true" aria-describedby="fuzzy-hint">
+              Enable fuzzy matching (also catch typos and misspellings)
+            </label>
+            <p class="tiny" id="fuzzy-hint">Lets a few letters be wrong, missing, extra or swapped (Febrese, Febrez, Febreeze). Words of 4 letters or fewer never get typos, because they'd match too many other words (tide &rarr; tile, ride).</p>
+            <div id="fuzzy-controls" class="fuzzy-controls" hidden>
+              <label for="fuzzy_strictness">Strictness: <output id="fuzzy-strictness-value" for="fuzzy_strictness">{DEFAULT_STRICTNESS}</output></label>
+              <input id="fuzzy_strictness" name="fuzzy_strictness" type="range" min="0" max="100" step="5" value="{DEFAULT_STRICTNESS}" aria-describedby="fuzzy-scale">
+              <div id="fuzzy-scale" class="fuzzy-scale tiny">
+                <span>0 &middot; anything goes</span><span>70 &middot; ~2 letters</span><span>90 &middot; ~1 letter</span><span>100 &middot; no typos</span>
+              </div>
+            </div>
+            <div class="match-preview" id="match-preview" aria-live="polite"></div>
+            <label class="check-row">
+              <input id="disguised_search" name="disguised_search" type="checkbox" value="true" aria-describedby="disguised-search-hint">
+              Also search disguised spellings (slower)
+            </label>
+            <p class="tiny" id="disguised-search-hint">Walmart's search usually won't show F3breze listings when you search &ldquo;febreze&rdquo;, so this also searches up to 5 disguised spellings of each keyword. Each spelling is a full extra search, so it's slower and hits more robot checks.</p>
+          </fieldset>
           <label for="negative_keywords" style="margin-top:12px;">Exclude titles containing <span class="tiny">(optional)</span></label>
           <textarea id="negative_keywords" name="negative_keywords" style="min-height:72px;" aria-describedby="negative-hint" placeholder="Example:\ntool\nrefill"></textarea>
           <p class="tiny" id="negative-hint">One per line (or comma-separated). Any listing whose title contains one of these is skipped, even if it matches a keyword. Matches word starts, so &ldquo;tool&rdquo; also drops &ldquo;tools&rdquo; and &ldquo;toolkit&rdquo; but not &ldquo;stool&rdquo;. Applies to Listing Brand searches too.</p>
@@ -1409,6 +1460,7 @@ def home() -> HTMLResponse:
       If Walmart does not show a seller-country clue, the listing stays unflagged or unknown. If a robot check or captcha pops up, the scan logs it and moves on.
       Open <strong>Scan settings</strong> to set a max price. With "Match by price only" checked, listings under the price count as matches regardless of country; unchecked, price is an extra filter on top of the country match.
       By default the keyword must appear in the listing title; check "Also match against description" to count a listing as a match if the keyword shows up in EITHER the title or the description.
+      Keyword searches <strong>always see through disguised spellings</strong> (F3breze, F.e.b.r.e.z.e, lookalike letters); turn on <strong>fuzzy matching</strong> to also allow a few wrong letters, and use the strictness slider to choose how many. Matches found this way are tagged Disguised or Fuzzy in the "Matched as" column.
       Set a <strong>counterfeit review threshold</strong> to also flag sellers whose reviews frequently mention fake/counterfeit/knockoff products &mdash; this works across China, US, and Unknown alike, as long as the keyword still matches.
       Switch <strong>Search by</strong> to "Listing Brand" to instead pull every listing tagged with a specific seller-supplied Brand attribute (e.g. a private bulk-seller brand code) &mdash; brand mode trusts the listing's own Brand field exactly, it does not require the brand text to appear in the title.
       Set <strong>Target country</strong> to "Any (no country filter)" to pull every listing matching your keyword/brand regardless of country signal &mdash; useful for a pure brand sweep where you just want everything under that brand, not just the China/US-flagged subset.
@@ -1416,7 +1468,7 @@ def home() -> HTMLResponse:
     </p>
   </div>
 """
-    return html_page("New scan", body, SEARCH_FORM_SCRIPT, active="scan",
+    return html_page("New scan", body, SEARCH_FORM_SCRIPT, active="scan", scripts=("match_options.js",),
                      subtitle="Best-effort listing prescreening for seller-country signals. If the country is not explicit, the tool says unknown.")
 
 
@@ -1435,6 +1487,9 @@ def scan(
     counterfeit_min: str = Query(default=""),
     negative_keywords: str = Query(default=""),
     generic_only: bool = Query(default=False),
+    fuzzy: bool = Query(default=False),
+    fuzzy_strictness: int = Query(default=DEFAULT_STRICTNESS, ge=0, le=100),
+    disguised_search: bool = Query(default=False),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
@@ -1451,7 +1506,8 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords), generic_only)
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords), generic_only,
+                        fuzzy_strictness if fuzzy else None, disguised_search)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1470,6 +1526,8 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="unknown-count">Unknown signal: 0</span>
       <span class="pill" id="excluded-count" hidden>Excluded by title: 0</span>
       <span class="pill" id="generic-only-pill" hidden title="Matches also need a placeholder Brand: Generic, Unbranded, NOBRAND, Unknown, ...">Generic brands only</span>
+      <span class="pill" id="fuzzy-pill" hidden>Fuzzy matching</span>
+      <span class="pill" id="disguised-search-pill" hidden>Disguised spellings searched</span>
     </div>
     <div class="status">
       <div><strong>What the app is doing right now</strong></div>
@@ -1726,6 +1784,13 @@ async function refreshJob() {
   excludedPill.textContent = `Excluded by title: ${stats.excluded_total || 0}`;
   excludedPill.title = 'Excluded terms: ' + (data.negative_terms || []).join(', ');
 document.getElementById('generic-only-pill').hidden = !data.generic_only;
+const fuzzyPill = document.getElementById('fuzzy-pill');
+fuzzyPill.hidden = data.fuzzy_strictness == null;
+fuzzyPill.textContent = `Fuzzy matching: strictness ${data.fuzzy_strictness}`;
+const disguisedPill = document.getElementById('disguised-search-pill');
+disguisedPill.hidden = !data.disguised_searches;
+disguisedPill.textContent = `+${data.disguised_searches} disguised spelling searches`;
+disguisedPill.title = (data.search_plan || []).filter(p => p[0] !== p[1]).map(p => p[1]).join(', ');
   const visibleFor = rows => matchesOnly ? rows.filter(r => (r.scan_status || 'unknown') === 'match') : rows;
   const chinaVisible = visibleFor(chinaRows), usVisible = visibleFor(usRows), unknownVisible = visibleFor(unknownRows);
   const countSuffix = matchesOnly ? ' matches' : ' scanned';
@@ -1859,6 +1924,21 @@ def resume_job(job_id: str) -> RedirectResponse:
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
 
+@app.get("/api/match-preview")
+def api_match_preview(keywords: str = Query(default=""), fuzzy: bool = Query(default=False),
+                      strictness: int = Query(default=DEFAULT_STRICTNESS, ge=0, le=100)) -> JSONResponse:
+    """Plain-English preview of how each typed keyword will be matched.
+
+    Served from fuzzy_match.py so the New scan page never re-implements the rules.
+    """
+    terms = split_keywords(keywords)[:10]
+    return JSONResponse({
+        "words": [{"word": w, "allowed": allowed_edits(w, strictness if fuzzy else None), "short": len(w) <= SHORT_WORD_MAX}
+                  for w in dict.fromkeys(w for t in terms for w in keyword_words(t))],
+        "spellings": {t: disguised_spellings(t) for t in terms},
+    })
+
+
 @app.get("/api/job/{job_id}")
 def api_job(job_id: str) -> JSONResponse:
     with lock:
@@ -1872,7 +1952,7 @@ def api_job(job_id: str) -> JSONResponse:
 QUEUE_ROW_FIELDS = (
     "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_url",
     "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
-    "scan_status", "evidence", "review_state",
+    "scan_status", "evidence", "review_state", "match_kind",
 )
 
 

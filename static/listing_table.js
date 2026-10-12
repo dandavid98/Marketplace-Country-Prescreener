@@ -27,6 +27,11 @@
   function priceText(r) {
     return r.price_text || (r.price_value != null ? '$' + Number(r.price_value).toFixed(2) : 'Unknown');
   }
+  var KIND_LABELS = { disguised: 'Disguised', fuzzy: 'Fuzzy' };
+  function kindBadge(r) {   // how the keyword matched; nothing for plain exact matches
+    var label = KIND_LABELS[r.match_kind];
+    return label ? '<span class="badge kind-' + esc(r.match_kind) + '" title="' + esc(r.evidence || '') + '">' + label + '</span>' : '';
+  }
 
   var BASE_COLUMNS = [
     { key: 'item_id', label: 'Item ID', thClass: 'col-id', filter: 'text', value: function (r) { return r.item_id || ''; } },
@@ -58,7 +63,10 @@
       cell: function (r) {
         var s = r.scan_status || 'unknown';
         return '<span class="badge ' + esc(s) + '" title="' + esc(r.evidence || '') + '">' + esc(s) + '</span>';
-      } }
+      } },
+    { key: 'match_kind', label: 'Matched as', thClass: 'col-short', filter: 'select',
+      value: function (r) { return KIND_LABELS[r.match_kind] || 'Exact'; },
+      cell: function (r) { return kindBadge(r) || '<span class="muted">Exact</span>'; } }
   ];
 
   var ARROWS = { none: '\u2195', ascending: '\u2191', descending: '\u2193' };
