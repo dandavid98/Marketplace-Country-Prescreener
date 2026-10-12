@@ -165,6 +165,7 @@ class ListingRecord:
     counterfeit_checked: bool = False
     match_kind: str = ""   # "" = exact, else "disguised" | "fuzzy"
     remembered: str = ""   # decision_memory note: "" | "auto_disputed" | "approved_before"
+    negatives: str = ""    # comma-separated exclusions active when this row was scanned
     id: int | None = None
 
 
@@ -620,6 +621,7 @@ def init_db() -> None:
             'listing_brand': "alter table reviews add column listing_brand text not null default ''",
             'counterfeit_checked': "alter table reviews add column counterfeit_checked integer not null default 0",
             'match_kind': "alter table reviews add column match_kind text not null default ''",
+            'negatives': "alter table reviews add column negatives text not null default ''",
         }
         for col, sql in additions.items():
             if col not in cols:
@@ -652,8 +654,8 @@ def save_record(record: ListingRecord) -> int:
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind, remembered
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind, remembered, negatives
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -683,6 +685,7 @@ def save_record(record: ListingRecord) -> int:
                 int(record.counterfeit_checked),
                 record.match_kind,
                 record.remembered,
+                record.negatives,
             ),
         )
         conn.commit()
@@ -763,13 +766,14 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Remembered"]
+    headers = ["Keyword", "Negatives", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Remembered"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
     ws.append(headers)
     for row in rows:
         values = [
             row.get("keyword", ""),
+            row.get("negatives", ""),
             row.get("listing_brand", ""),
             row.get("market", DEFAULT_MARKET),
             row.get("title", ""),
@@ -1126,6 +1130,7 @@ def run_job(job_id: str) -> None:
                             keyword_listing_count += 1
                             job["message"] = f"Finished scan {discovered} for {query!r} on page {pages_crawled}"
                         record.job_id = job_id
+                        record.negatives = ", ".join(negative_terms)
                         keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description, generic_only, fuzzy_strictness)
                         if status in ("walmart_sold", "excluded"):
                             # Sold-and-shipped-by-Walmart carries zero third-party
