@@ -40,8 +40,15 @@
     var qs = new URLSearchParams({ keywords: keywords, fuzzy: fuzzyOn, strictness: strictness });
     fetch('/api/match-preview?' + qs).then(function (r) { return r.json(); }).then(function (data) {
       if (mine !== seq) return;               // a newer keystroke already won
-      var rows = data.words.map(function (w) {
-        return '<li><code>' + esc(w.word) + '</code>: ' + describeWord(w, fuzzyOn) + '</li>';
+      var rows = data.keywords.map(function (k) {
+        if (k.words.length === 1) {
+          return '<li><code>' + esc(k.words[0].word) + '</code>: ' + describeWord(k.words[0], fuzzyOn) + '</li>';
+        }
+        // multi-word keyword: still ONE keyword (one search); every word must be in the title, any order
+        return '<li><code>' + esc(k.keyword) + '</code>: one keyword, every word must be in the title (any order)<ul>' +
+          k.words.map(function (w) {
+            return '<li><code>' + esc(w.word) + '</code>: ' + describeWord(w, fuzzyOn) + '</li>';
+          }).join('') + '</ul></li>';
       }).join('');
       var html = '<strong>What will match:</strong><ul>' + rows + '</ul>';
       if ($('disguised_search').checked) {

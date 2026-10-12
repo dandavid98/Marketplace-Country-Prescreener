@@ -1936,8 +1936,8 @@ def api_match_preview(keywords: str = Query(default=""), fuzzy: bool = Query(def
     """
     terms = split_keywords(keywords)[:10]
     return JSONResponse({
-        "words": [{"word": w, "allowed": allowed_edits(w, strictness if fuzzy else None), "short": len(w) <= SHORT_WORD_MAX}
-                  for w in dict.fromkeys(w for t in terms for w in keyword_words(t))],
+        "keywords": [{"keyword": t, "words": [{"word": w, "allowed": allowed_edits(w, strictness if fuzzy else None), "short": len(w) <= SHORT_WORD_MAX}
+                                              for w in keyword_words(t)]} for t in terms],
         "spellings": {t: disguised_spellings(t) for t in terms},
     })
 
