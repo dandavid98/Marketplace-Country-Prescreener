@@ -24,6 +24,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+import decision_memory
 from brand_signals import is_generic_brand
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
 from fuzzy_match import DEFAULT_STRICTNESS, SHORT_WORD_MAX, KeywordMatch, allowed_edits, disguised_spellings, keyword_words, legacy_contains, match_keyword
@@ -162,6 +163,7 @@ class ListingRecord:
     listing_brand: str = ""
     counterfeit_checked: bool = False
     match_kind: str = ""   # "" = exact, else "disguised" | "fuzzy"
+    remembered: str = ""   # decision_memory note: "" | "auto_disputed" | "approved_before"
     id: int | None = None
 
 
@@ -632,6 +634,7 @@ def init_db() -> None:
              where scan_status = '' and evidence in ('error', 'blocked')
             """
         )
+        decision_memory.init_memory(conn, extract_item_id)
         conn.commit()
 
 
@@ -640,13 +643,16 @@ init_db()
 
 def save_record(record: ListingRecord) -> int:
     with sqlite3.connect(DB_PATH) as conn:
+        # previously disputed items go straight to Disputed; approved ones get a note
+        record.review_state, record.remembered, record.evidence = decision_memory.apply_to_new_row(
+            conn, record.item_id, record.review_state, record.evidence)
         cur = conn.execute(
             """
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind, remembered
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -675,6 +681,7 @@ def save_record(record: ListingRecord) -> int:
                 record.listing_brand,
                 int(record.counterfeit_checked),
                 record.match_kind,
+                record.remembered,
             ),
         )
         conn.commit()
@@ -709,13 +716,19 @@ def update_review_state(record_id: int, review_state: str) -> None:
     update_review_states([record_id], review_state)
 
 
+STATE_TAB_LABELS = {"pending": "Pending", "approved": "Approved", "rejected": "Disputed", "not_queued": "Not Queued"}
+REMEMBERED_LABELS = {decision_memory.AUTO_DISPUTED: "Auto-disputed", decision_memory.APPROVED_BEFORE: "Approved before"}
+
+
 REVIEW_STATES = ("pending", "approved", "rejected", "not_queued")
 
 
-def update_review_states(record_ids: list[int], review_state: str) -> int:
-    """Set one review state on many rows in a single transaction. Returns rows changed."""
+def update_review_states(record_ids: list[int], review_state: str) -> tuple[int, int]:
+    """Set one review state on many rows in one transaction, remember the decision per
+    item ID, and apply it to that item's other pending rows.
+    Returns (rows changed, other rows changed by the memory cascade)."""
     if review_state not in REVIEW_STATES or not record_ids:
-        return 0
+        return 0, 0
     with sqlite3.connect(DB_PATH) as conn:
         changed = 0
         for start in range(0, len(record_ids), 500):           # stay under SQLite's variable limit
@@ -723,8 +736,9 @@ def update_review_states(record_ids: list[int], review_state: str) -> int:
             cur = conn.execute(f"update reviews set review_state = ? where id in ({','.join('?' * len(chunk))})",
                                (review_state, *chunk))
             changed += cur.rowcount
+        cascaded = decision_memory.record_decisions(conn, record_ids, review_state, utc_now())
         conn.commit()
-    return changed
+    return changed, cascaded
 
 
 def export_reviews_xlsx(job_id: str | None = None) -> Path:
@@ -734,7 +748,7 @@ def export_reviews_xlsx(job_id: str | None = None) -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As"]
+    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Remembered"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
     ws.append(headers)
@@ -750,6 +764,7 @@ def export_reviews_xlsx(job_id: str | None = None) -> Path:
             row.get("price_text", ""),
             row.get("country_signal", ""),
             (row.get("match_kind") or "exact").capitalize(),
+            REMEMBERED_LABELS.get(row.get("remembered") or "", ""),
         ]
         if any_counterfeit_checked:
             checked = row.get("counterfeit_checked")
@@ -1132,7 +1147,10 @@ def run_job(job_id: str) -> None:
                                 if len(job["results"]) > MAX_LIVE_RESULTS:
                                     del job["results"][: len(job["results"]) - MAX_LIVE_RESULTS]
                         if status == "match":
-                            append_log(job, f"Match found: {record.title or listing_url}")
+                            if record.remembered == decision_memory.AUTO_DISPUTED:
+                                append_log(job, f"Match auto-disputed (you disputed item {record.item_id} before): {record.title or listing_url}")
+                            else:
+                                append_log(job, f"Match found: {record.title or listing_url}")
                     with lock:
                         if job.get("stop_requested"):
                             stopped_mid_page = True
@@ -1971,7 +1989,7 @@ def api_job(job_id: str) -> JSONResponse:
 QUEUE_ROW_FIELDS = (
     "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_url",
     "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
-    "scan_status", "evidence", "review_state", "match_kind",
+    "scan_status", "evidence", "review_state", "match_kind", "remembered",
 )
 
 
@@ -2000,7 +2018,8 @@ def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...)) -> JSON
     if action not in BULK_ACTIONS:
         return JSONResponse({"error": f"unknown action {action!r}"}, status_code=400)
     ids = list(dict.fromkeys(ids))[:5000]
-    return JSONResponse({"updated": update_review_states(ids, BULK_ACTIONS[action]), "review_state": BULK_ACTIONS[action]})
+    updated, cascaded = update_review_states(ids, BULK_ACTIONS[action])
+    return JSONResponse({"updated": updated, "cascaded": cascaded, "review_state": BULK_ACTIONS[action]})
 
 
 @app.get("/queue", response_class=HTMLResponse)
@@ -2020,7 +2039,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         return f'<a class="button secondary{current}" href="{href}">{label}</a>'
 
     state_links = "".join(
-        _filter_link(f"/queue?state={s}&country_signal={country_signal}&job={job}", f"{s.replace('_', ' ').title()} ({state_counts[s]})", s == state)
+        _filter_link(f"/queue?state={s}&country_signal={country_signal}&job={job}", f"{STATE_TAB_LABELS[s]} ({state_counts[s]})", s == state)
         for s in state_counts
     )
     country_links = "".join(
@@ -2043,7 +2062,8 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       <div class="tiny" style="width:100%; margin-bottom:6px;">Country view</div>
       {country_links}
     </div>
-    <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.</p>
+    <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.
+      Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items come back marked "approved before". <strong>Not set</strong> forgets the decision.</p>
     <div class="fr-panel">
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
         <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span></div>

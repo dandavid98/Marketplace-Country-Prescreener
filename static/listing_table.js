@@ -146,7 +146,11 @@
       var key = e.target.dataset.filter;
       if (!key) return;
       var v = e.target.value.trim();
-      state.filters[key] = e.target.tagName === 'SELECT' ? v : v.toLowerCase();
+      v = e.target.tagName === 'SELECT' ? v : v.toLowerCase();
+      // text boxes fire 'change' again on blur; re-rendering then would swap out the
+      // row button the user is clicking, eating the click. Only render on a real change.
+      if ((state.filters[key] || '') === v) return;
+      state.filters[key] = v;
       state.limit = pageSize;
       save();
       render();

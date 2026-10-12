@@ -14,6 +14,16 @@
   var LABELS = { approve: 'Approved', reject: 'Disputed', unset: 'Set back to pending' };
   var STATE_FOR = { approve: 'approved', reject: 'rejected', unset: 'pending' };
   var REVIEW_LABELS = { approved: 'Approved', rejected: 'Disputed', pending: 'Pending', not_queued: 'Not queued' };
+  // decision memory (decision_memory.py): why a row got its state without you clicking it
+  var REMEMBERED = {
+    auto_disputed: { label: 'auto', title: 'Auto-disputed: you disputed this item ID before, so it skipped the pending queue.' },
+    approved_before: { label: 'approved before', title: 'You approved this item ID before. Still pending so you can check it again.' }
+  };
+  function reviewLabel(r) {
+    var base = REVIEW_LABELS[r.review_state] || r.review_state || '';
+    var note = REMEMBERED[r.remembered];
+    return note ? base + ' (' + note.label + ')' : base;
+  }
 
   function init(cfg) {
     var params = cfg.params;
@@ -47,10 +57,12 @@
       leadColumns: [selectColumn],
       extraColumns: [
         { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select',
-          value: function (r) { return REVIEW_LABELS[r.review_state] || r.review_state || ''; },
+          value: reviewLabel,
           cell: function (r) {
             var s = r.review_state || '';
-            return '<span class="badge review-' + esc(s) + '">' + esc(REVIEW_LABELS[s] || s) + '</span>';
+            var note = REMEMBERED[r.remembered];
+            return '<span class="badge review-' + esc(s) + '">' + esc(REVIEW_LABELS[s] || s) + '</span>' +
+              (note ? '<span class="badge remembered" title="' + esc(note.title) + '">' + esc(note.label) + '</span>' : '');
           } },
         { key: 'actions', label: 'Actions', thClass: 'col-actions', cell: function (r) {
             return '<div class="fr-row-actions">' +
@@ -149,10 +161,18 @@
       paint();
       say('Saving ' + ids.length.toLocaleString() + ' row' + (ids.length === 1 ? '' : 's') + '...');
       post(action, ids).then(function (res) {
-        applyStates(ids, STATE_FOR[action]);
         ids.forEach(function (id) { selected.delete(id); });
         lastUndo = before;
-        say(LABELS[action] + ' ' + res.updated.toLocaleString() + ' row' + (res.updated === 1 ? '' : 's') + '.', true);
+        var msg = LABELS[action] + ' ' + res.updated.toLocaleString() + ' row' + (res.updated === 1 ? '' : 's');
+        if (!res.cascaded) {
+          applyStates(ids, STATE_FOR[action]);
+          say(msg + '.', true);
+          return;
+        }
+        // memory touched repeats of the same item IDs elsewhere in the queue: reload to show them
+        say(msg + ', plus ' + res.cascaded.toLocaleString() + ' repeat' + (res.cascaded === 1 ? '' : 's') +
+            ' of the same item' + (ids.length === 1 ? '' : 's') + ' (remembered).', true);
+        return reload();
       }).catch(function (err) {
         say('Could not save (' + err.message + '). Nothing was changed.', false, true);
       }).then(function () { busy = false; paint(); });
