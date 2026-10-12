@@ -44,6 +44,8 @@
   --nav-active-text: oklch(0.488 0.243 264.376);   /* blue-700 */
   --nav-icon-btn: oklch(0.551 0.027 264.364);      /* gray-500 */
   --link: oklch(0.546 0.245 262.881);              /* blue-600 */
+  --fr-accent: oklch(0.558 0.288 302.321);         /* purple-600: Fast Review selection (PW) */
+  --fr-accent-text: oklch(0.496 0.265 301.924);    /* purple-700: 4.5:1+ on muted toolbar */
   --logbox-bg: oklch(0.21 0.034 264.665);          /* gray-900 */
   --logbox-text: oklch(0.928 0.006 264.531);       /* gray-200 */
 
@@ -85,6 +87,8 @@
   --nav-active-text: oklch(0.809 0.105 251.813);   /* blue-300 */
   --nav-icon-btn: oklch(0.707 0.022 261.325);      /* gray-400 */
   --link: oklch(0.707 0.165 254.624);              /* blue-400 */
+  --fr-accent: oklch(0.714 0.203 305.504);         /* purple-400 */
+  --fr-accent-text: oklch(0.827 0.119 306.383);    /* purple-300 */
   --logbox-bg: oklch(0.13 0.028 261.692);          /* gray-950 */
   color-scheme: dark;
 }
@@ -177,6 +181,7 @@ svg.icon { width: 1rem; height: 1rem; flex-shrink: 0; fill: none; stroke: curren
   .shell-item { justify-content: center; padding: 12px; }
   .shell-label, .shell-foot { display: none; }
   .shell-content { padding: 16px; }
+  .fr-toolbar { top: -16px; flex-wrap: wrap; }
 }
 
 /* ---------- button (components/ui/button.tsx) -------------------------------- */
@@ -309,6 +314,52 @@ th[aria-sort="ascending"] .sort-btn, th[aria-sort="descending"] .sort-btn { colo
 th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { opacity: 1; color: var(--link); }
 .filter-row th { padding-top: 0; padding-bottom: 8px; font-weight: 400; }
 .filter-row input, .filter-row select { height: 28px; padding: 2px 8px; font-size: 12px; }
+
+/* ---------- Fast Review (static/fast_review.js): ProductWatch FastReviewTable toolbar ---------- */
+.fr-panel { border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; overflow: clip; }  /* clip, not hidden: hidden would break the sticky toolbar */
+.fr-panel table { margin-top: 0; }
+/* queue has 12 fixed-width columns (~1124px); without this Title gets squeezed to 0px */
+#queue-table { min-width: 1420px; }
+#queue-table .col-id { width: 124px; }   /* 11-digit item IDs on one line */
+.fr-toolbar {
+  position: sticky; top: -24px; z-index: 3;   /* -24px = .shell-content padding, so no rows peek above it */ display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--muted) 70%, var(--card));
+}
+.fr-count { color: var(--muted-foreground); display: flex; align-items: center; gap: 8px; }
+.fr-selected { color: var(--fr-accent-text); font-weight: 600; }
+.fr-actions { display: flex; align-items: center; gap: 2px; }
+.fr-icon {
+  height: 28px; padding: 0 8px; gap: 4px; font-size: 12px; background: transparent; color: var(--muted-foreground);
+  border: 1px solid transparent; border-radius: calc(var(--radius) * .8);
+}
+.fr-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.fr-icon:hover { background: var(--muted); color: var(--foreground); }
+.fr-approve:not(:disabled):hover { background: color-mix(in oklab, var(--success) 12%, transparent); color: var(--success-text); }
+.fr-dispute:not(:disabled):hover { background: color-mix(in oklab, var(--destructive) 12%, transparent); color: var(--destructive-text); }
+.fr-icon:disabled { opacity: .45; cursor: not-allowed; background: transparent; color: var(--muted-foreground); }
+.fr-icon[aria-expanded="true"] { background: var(--muted); color: var(--foreground); }
+.fr-help { padding: 8px 12px; border-bottom: 1px solid var(--border); line-height: 1.8; }
+.fr-help kbd {
+  font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 1px 5px; border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 4px; background: var(--card); color: var(--foreground);
+}
+.fr-status:empty { display: none; }
+.fr-status { padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--border); color: var(--foreground); }
+.fr-status.error { color: var(--destructive-text); }
+.listing-table .col-select { width: 44px; text-align: center; }
+.listing-table td.cell-select { position: relative; padding: 0; text-align: center; vertical-align: middle; }
+.fr-box { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; cursor: pointer; }
+.fr-box input, .fr-all { width: 16px; height: 16px; margin: 0; accent-color: var(--fr-accent); cursor: pointer; }
+.listing-table tbody tr.fr-selected-row td { background: color-mix(in oklab, var(--fr-accent) 9%, transparent); }
+.listing-table tbody tr.fr-cursor td { box-shadow: inset 0 1px 0 var(--fr-accent), inset 0 -1px 0 var(--fr-accent); }
+.listing-table tbody tr.fr-cursor td:first-child { box-shadow: inset 3px 0 0 var(--fr-accent), inset 0 1px 0 var(--fr-accent), inset 0 -1px 0 var(--fr-accent); }
+.listing-table tbody tr.fr-leaving { opacity: .35; transition: opacity .2s; }
+.badge.review-approved { border-color: transparent; background: color-mix(in oklab, var(--success) 10%, transparent); color: var(--success-text); }
+.badge.review-rejected { border-color: transparent; background: color-mix(in oklab, var(--destructive) 10%, transparent); color: var(--destructive-text); }
+.badge.review-pending { border-color: transparent; background: color-mix(in oklab, var(--warning) 12%, transparent); color: var(--warning-text); }
+.fr-row-actions { display: flex; gap: 4px; }
+.fr-row-actions .button { height: 26px; padding: 0 8px; font-size: 12px; }
 .table-scroll .listing-table thead tr.filter-row th { top: var(--filter-row-top, 37px); }
 .listing-table tfoot td { border-bottom: 0; }
 .listing-table tfoot .button { height: 26px; margin-left: 8px; font-size: 12px; }

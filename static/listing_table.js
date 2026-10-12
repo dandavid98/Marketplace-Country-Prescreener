@@ -8,8 +8,11 @@
 
    storageKey (optional): remembers sort + filters in sessionStorage, so they
    survive the full-page reload after Approve/Reject on the queue.
+   leadColumns (optional): columns placed BEFORE the base ones (e.g. a select box).
+   onRender(shownRows) (optional): called after every render with the rows on screen,
+   in on-screen order. Rows with an `id` get <tr data-row-id="...">.
 
-   Column spec: { key, label, value(r), sortValue?(r), search?(r), cell?(r),
+   Column spec: { key, label, headerHtml?, value(r), sortValue?(r), search?(r), cell?(r),
                   filter?: 'text' | 'select', thClass?, tdClass? }
    A column is sortable when it has value or sortValue. */
 (function (global) {
@@ -80,7 +83,7 @@
 
   function create(table, opts) {
     opts = opts || {};
-    var columns = BASE_COLUMNS.concat(opts.extraColumns || []);
+    var columns = (opts.leadColumns || []).concat(BASE_COLUMNS, opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
     var state = { rows: [], sortKey: null, sortDir: 'none', filters: {}, limit: pageSize, optionSigs: {} };
     var byKey = {};
@@ -108,6 +111,7 @@
     table.innerHTML =
       '<thead><tr>' + columns.map(function (c) {
         var cls = c.thClass ? ' class="' + c.thClass + '"' : '';
+        if (c.headerHtml) return '<th scope="col"' + cls + '>' + c.headerHtml + '</th>';
         if (!sortable(c)) return '<th scope="col"' + cls + '>' + esc(c.label) + '</th>';
         return '<th scope="col"' + cls + ' data-key="' + c.key + '" aria-sort="none">' +
                '<button type="button" class="sort-btn" title="Sort by ' + esc(c.label) + '">' + esc(c.label) +
@@ -209,7 +213,8 @@
       var empty = filtered ? 'No rows match these filters.'
                            : (typeof opts.emptyText === 'function' ? opts.emptyText() : (opts.emptyText || 'No rows yet.'));
       tbody.innerHTML = shown.map(function (r) {
-        return '<tr>' + columns.map(function (c) {
+        var rid = r.id != null ? ' data-row-id="' + esc(r.id) + '"' : '';
+        return '<tr' + rid + '>' + columns.map(function (c) {
           var td = c.tdClass ? '<td class="' + c.tdClass + '">' : '<td>';
           return td + (c.cell ? c.cell(r) : esc(c.value(r))) + '</td>';
         }).join('') + '</tr>';
@@ -223,6 +228,7 @@
         foot = rows.length + ' of ' + state.rows.length + ' rows match';
       }
       tfoot.innerHTML = foot ? '<tr><td colspan="' + columns.length + '" class="tiny">' + foot + '</td></tr>' : '';
+      if (opts.onRender) opts.onRender(shown, rows.length);
     }
 
     function syncStickyOffset() {
@@ -233,6 +239,8 @@
 
     return {
       setRows: function (rows) { state.rows = rows || []; render(); },
+      getRows: function () { return state.rows; },
+      getMatchingRows: visibleRows,      // every row passing the filters, in sorted order
       render: render
     };
   }

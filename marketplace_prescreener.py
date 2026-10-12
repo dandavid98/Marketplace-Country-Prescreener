@@ -17,7 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, urlencode, urlunparse
 from urllib.request import Request, urlopen
 
-from fastapi import FastAPI, Query
+from fastapi import Body, FastAPI, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
@@ -706,9 +706,25 @@ def count_reviews(review_state: str | None = None, country_signal: str | None = 
 
 
 def update_review_state(record_id: int, review_state: str) -> None:
+    update_review_states([record_id], review_state)
+
+
+REVIEW_STATES = ("pending", "approved", "rejected", "not_queued")
+
+
+def update_review_states(record_ids: list[int], review_state: str) -> int:
+    """Set one review state on many rows in a single transaction. Returns rows changed."""
+    if review_state not in REVIEW_STATES or not record_ids:
+        return 0
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("update reviews set review_state = ? where id = ?", (review_state, record_id))
+        changed = 0
+        for start in range(0, len(record_ids), 500):           # stay under SQLite's variable limit
+            chunk = record_ids[start:start + 500]
+            cur = conn.execute(f"update reviews set review_state = ? where id in ({','.join('?' * len(chunk))})",
+                               (review_state, *chunk))
+            changed += cur.rowcount
         conn.commit()
+    return changed
 
 
 def export_reviews_xlsx(job_id: str | None = None) -> Path:
@@ -1971,31 +1987,20 @@ def api_queue(state: str = Query(default="pending"), country_signal: str = Query
 
 
 QUEUE_TABLE_SCRIPT = """
-const queueParams = __QUEUE_PARAMS__;
-const esc = ListingTable.escapeHtml;
-const queueTable = ListingTable.create(document.getElementById('queue-table'), {
-  pageSize: 100,
-  storageKey: 'prescreener_queue',
-  emptyText: 'No items in this queue view.',
-  extraColumns: [
-    { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select', value: r => r.review_state || '' },
-    { key: 'actions', label: 'Actions', thClass: 'col-actions', tdClass: 'table-actions', cell: r => {
-        const back = encodeURIComponent(location.pathname + location.search);
-        return `<a class="button success" href="/review/${r.id}/approve?return_to=${back}">Approve</a>` +
-               `<a class="button destructive" href="/review/${r.id}/reject?return_to=${back}">Reject</a>`;
-      } },
-  ],
-});
-document.querySelector('#queue-table tbody').innerHTML = '<tr><td colspan="11" class="muted">Loading queue...</td></tr>';
-fetch('/api/queue?' + new URLSearchParams(queueParams))
-  .then(res => { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
-  .then(rows => queueTable.setRows(rows))
-  .catch(err => {
-    document.querySelector('#queue-table tbody').innerHTML =
-      `<tr><td colspan="11" class="muted">Couldn't load the queue (${esc(err.message)}). Refresh to try again.</td></tr>`;
-  });
+FastReview.init({ params: __QUEUE_PARAMS__ });
 initThumbPreview();
 """
+
+BULK_ACTIONS = {"approve": "approved", "reject": "rejected", "unset": "pending"}
+
+
+@app.post("/api/review/bulk")
+def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...)) -> JSONResponse:
+    """Fast Review: approve / dispute (reject) / unset many queue rows in one call."""
+    if action not in BULK_ACTIONS:
+        return JSONResponse({"error": f"unknown action {action!r}"}, status_code=400)
+    ids = list(dict.fromkeys(ids))[:5000]
+    return JSONResponse({"updated": update_review_states(ids, BULK_ACTIONS[action]), "review_state": BULK_ACTIONS[action]})
 
 
 @app.get("/queue", response_class=HTMLResponse)
@@ -2039,13 +2044,37 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       {country_links}
     </div>
     <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.</p>
-    <div class="table-x"><table id="queue-table"></table></div>
+    <div class="fr-panel">
+      <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
+        <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span></div>
+        <div class="fr-actions">
+          <button type="button" class="fr-icon fr-approve" data-bulk="approve" title="Approve selected (Shift+A)" aria-label="Approve selected" aria-keyshortcuts="Shift+A" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span>Approve</span></button>
+          <button type="button" class="fr-icon fr-dispute" data-bulk="reject" title="Dispute selected (Shift+D)" aria-label="Dispute selected" aria-keyshortcuts="Shift+D" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18L18 6M6 6l12 12"/></svg><span>Dispute</span></button>
+          <button type="button" class="fr-icon fr-unset" data-bulk="unset" title="Not set: send back to pending (Shift+Z)" aria-label="Not set, send back to pending" aria-keyshortcuts="Shift+Z" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg><span>Not set</span></button>
+          <button type="button" class="fr-icon" id="fr-clear" title="Clear selection (Esc)" aria-label="Clear selection" aria-keyshortcuts="Escape" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12M9 7V4h6v3"/></svg><span>Clear</span></button>
+          <button type="button" class="fr-icon" id="fr-help-toggle" aria-expanded="false" aria-controls="fr-help" title="Keyboard shortcuts">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v10H3zM7 11h.01M11 11h.01M15 11h.01M8 14h8"/></svg><span>Keys</span></button>
+        </div>
+      </div>
+      <div id="fr-help" class="fr-help tiny" hidden>
+        <strong>Click</strong> a box to select &middot; <strong>Shift+click</strong> another box to select the whole range (Shift+click on a ticked range unticks it) &middot;
+        <kbd>J</kbd>/<kbd>K</kbd> move down/up &middot; <kbd>Space</kbd> toggle row &middot; <kbd>Shift</kbd>+<kbd>J</kbd>/<kbd>K</kbd> extend selection &middot;
+        <kbd>Shift</kbd>+<kbd>A</kbd> approve &middot; <kbd>Shift</kbd>+<kbd>D</kbd> dispute &middot; <kbd>Shift</kbd>+<kbd>Z</kbd> not set &middot; <kbd>Esc</kbd> clear.
+        The header box selects every row that matches your filters, not just the ones on screen.
+      </div>
+      <div id="fr-status" class="fr-status" role="status" aria-live="polite"></div>
+      <div class="table-x"><table id="queue-table"></table></div>
+    </div>
   </div>
 """
     params = json.dumps({"state": state, "country_signal": country_signal, "job": job}).replace("</", "<\\/")
     script = THUMB_PREVIEW_SCRIPT + QUEUE_TABLE_SCRIPT.replace("__QUEUE_PARAMS__", params)
-    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js",),
-                     subtitle="Approve or reject prescreened listings, then export the evidence.")
+    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "fast_review.js"),
+                     subtitle="Approve or dispute prescreened listings, then export the evidence.")
 
 
 
