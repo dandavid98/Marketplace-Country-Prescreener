@@ -459,6 +459,13 @@ def term_matches_listing(
     return keyword_matches_listing(term, title, description, match_description, fuzzy_strictness)
 
 
+def country_matches_listing(target_country: str, country_signal: str, listing_brand: str,
+                            search_type: str, generic_only: bool, generic_include: bool) -> bool:
+    """Inclusive mode adds generic-brand hits without dropping ordinary country hits."""
+    return (target_country == "Any" or generic_only or country_signal == target_country
+            or (generic_include and search_type == "keyword" and is_generic_brand(listing_brand)))
+
+
 def find_excluded_term(title: str, negative_terms: list[str] | tuple[str, ...]) -> str:
     """Return the first negative term found in the listing title, or "" if none.
 
@@ -816,12 +823,13 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None, generic_only: bool = False, fuzzy_strictness: int | None = None, disguised_search: bool = False) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None, generic_only: bool = False, fuzzy_strictness: int | None = None, disguised_search: bool = False, generic_include: bool = False) -> str:
     global LATEST_JOB_ID
     job_id = uuid.uuid4().hex[:10]
     market_obj = get_market(market)
     search_type = search_type if search_type in ("keyword", "brand") else DEFAULT_SEARCH_TYPE
     generic_only = bool(generic_only and search_type == "keyword")
+    generic_include = bool(generic_include and search_type == "keyword" and not generic_only)
     fuzzy_strictness = fuzzy_strictness if search_type == "keyword" else None
     # (keyword it reports as, query typed into Walmart search). Disguised
     # spellings are extra searches whose listings still match the REAL keyword.
@@ -843,6 +851,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "match_description": match_description,
         "negative_terms": list(negative_terms or []),
         "generic_only": generic_only,
+        "generic_include": generic_include,
         "fuzzy_strictness": fuzzy_strictness,
         "search_plan": search_plan,
         "disguised_searches": len(search_plan) - len(keywords),
@@ -854,6 +863,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."]
                 + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else [])
                 + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...). Any country of origin counts; target country is ignored."] if generic_only else [])
+                + (["Standard + generic: non-generic listings need the target country; generic listing brands match from any country."] if generic_include else [])
                 + (["Disguise detection on: F3breze / F.e.b.r.e.z.e / lookalike letters count as the real keyword."] if search_type == "keyword" else [])
                 + ([f"Fuzzy matching on at strictness {fuzzy_strictness}: " + "; ".join(f"{w} allows {allowed_edits(w, fuzzy_strictness)} letter difference(s)" for kw in keywords for w in keyword_words(kw))] if fuzzy_strictness is not None else [])
                 + (["Also searching disguised spellings: " + ", ".join(q for kw, q in search_plan if q != kw)] if len(search_plan) > len(keywords) else []),
@@ -889,7 +899,7 @@ def _failed_scan(item_id: str, status: str, evidence: str) -> tuple[str, str, st
     return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", "product page", evidence, status, "", item_id, "", "Unknown", 0, ""
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None, generic_include: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
@@ -960,16 +970,17 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     if seller_name == "Unknown" and seller_page_title:
         seller_name = seller_page_title
     keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description, generic_only, fuzzy_strictness)
-    # "Any" target country means no country filter -- every listing is
-    # country-eligible regardless of what extract_signals found, so status
-    # depends purely on keyword_ok (or brand_ok). Generic-only searches ignore
-    # country too: a generic brand from ANY origin (US included) is a true
-    # positive. Otherwise, require an explicit match against the target country.
-    country_ok = target_country == "Any" or generic_only or country_signal == target_country
+    # "Any" means no country filter. Generic-only scans ignore country for
+    # placeholders; inclusive scans add placeholders from any country while
+    # still requiring the target country for every non-generic listing.
+    country_ok = country_matches_listing(target_country, country_signal, listing_brand,
+                                         search_type, generic_only, generic_include)
     if country_ok:
         evidence = f"{evidence_source}: {evidence}"
         if generic_only and keyword_ok:
             evidence = f"{evidence} (generic listing brand {listing_brand!r}; country of origin ignored for generic-only searches)"
+        elif generic_include and keyword_ok and is_generic_brand(listing_brand) and country_signal != target_country:
+            evidence = f"{evidence} (generic listing brand {listing_brand!r}; country of origin ignored for generic-brand match)"
         if not keyword_ok:
             if search_type == "brand":
                 evidence = f"{evidence} (listing brand {listing_brand or 'Unknown'!r} does not match target brand {keyword!r}, treating as non-match)"
@@ -983,9 +994,9 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None) -> tuple[ListingRecord, str]:
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False, fuzzy_strictness: int | None = None, generic_include: bool = False) -> tuple[ListingRecord, str]:
     market = market or MARKETS[DEFAULT_MARKET]
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms, generic_only, fuzzy_strictness)
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms, generic_only, fuzzy_strictness, generic_include)
     found = find_keyword_match(keyword, title, description, match_description, fuzzy_strictness) if search_type == "keyword" else None
     match_kind = found.kind if found and found.kind != "exact" else ""
     if match_kind:
@@ -1035,6 +1046,7 @@ def run_job(job_id: str) -> None:
     match_description = bool(job.get("match_description"))
     negative_terms = tuple(job.get("negative_terms") or ())
     generic_only = bool(job.get("generic_only"))
+    generic_include = bool(job.get("generic_include"))
     fuzzy_strictness = job.get("fuzzy_strictness")
     search_plan = job.get("search_plan") or [[kw, kw] for kw in keywords]
     counterfeit_min = job.get("counterfeit_min")
@@ -1125,7 +1137,7 @@ def run_job(job_id: str) -> None:
                 # in "stopping" forever (Resume button never appeared).
                 pool = ThreadPoolExecutor(max_workers=worker_count)
                 futures = {
-                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms, generic_only, fuzzy_strictness): listing_url
+                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms, generic_only, fuzzy_strictness, generic_include): listing_url
                     for listing_url in new_urls
                 }
                 completed_urls: set[str] = set()
@@ -1357,7 +1369,7 @@ function updateSearchTypeLabels() {
   document.getElementById('keywords-hint').textContent = isBrand
     ? 'One listing brand per line (exact match, case-insensitive). Every listing tagged with that brand is pulled, regardless of what the title says.'
     : 'One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.';
-  document.getElementById('generic-only-wrap').hidden = isBrand;
+  document.getElementById('generic-mode-wrap').hidden = isBrand;
   document.getElementById('match-options').hidden = isBrand;
 }
 
@@ -1380,8 +1392,13 @@ function restorePrescreenerPrefs() {
   var countrySelect = document.getElementById('country');
   if (country && countrySelect) countrySelect.value = country;
 
-  var genericOnly = document.getElementById('generic_only');
-  if (genericOnly) genericOnly.checked = localStorage.getItem('prescreener_generic_only') === 'true';
+  var genericMode = document.getElementById('generic_mode');
+  if (genericMode) {
+    var savedMode = localStorage.getItem('prescreener_generic_mode');
+    // Preserve the old checked toggle preference when moving to three choices.
+    genericMode.value = ['standard', 'only', 'include'].includes(savedMode) ? savedMode :
+      (localStorage.getItem('prescreener_generic_only') === 'true' ? 'only' : 'standard');
+  }
 
   updateSearchTypeLabels();
 }
@@ -1415,12 +1432,14 @@ def home() -> HTMLResponse:
           <label for="keywords" id="keywords-label">Keywords</label>
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
           <p class="tiny" id="keywords-hint">One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.</p>
-          <div id="generic-only-wrap" style="margin-top:8px;">
-            <label style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
-              <input id="generic_only" name="generic_only" type="checkbox" value="true" aria-describedby="generic-only-hint" onchange="savePrescreenerPref('generic_only', this.checked)" style="width:auto;">
-              Generic listing brands only
-            </label>
-            <p class="tiny" id="generic-only-hint">Keyword must be in the title <strong>and</strong> the listing's Brand must be a placeholder like Generic, Unbranded, Unbrand, NOBRAND, No Brand, Unknown, N/A, None, OEM (capitals, spaces and punctuation ignored). <strong>Any country of origin counts</strong> (China, US or unknown), so Target country is ignored. Great for broad keywords like &ldquo;febreze&rdquo;.</p>
+          <div id="generic-mode-wrap" style="margin-top:8px;">
+            <label for="generic_mode">Listing brand matching</label>
+            <select id="generic_mode" name="generic_mode" aria-describedby="generic-mode-hint" onchange="savePrescreenerPref('generic_mode', this.value)">
+              <option value="standard">Standard: target-country listings</option>
+              <option value="only">Generic brands only: any country</option>
+              <option value="include">Standard + generic brands: any country for generic</option>
+            </select>
+            <p class="tiny" id="generic-mode-hint">All options require the keyword to match. Standard uses your target country; generic-only keeps just placeholder listing brands regardless of country. Standard + generic keeps regular target-country matches <strong>and</strong> adds placeholder listing brands from any country. Sold-and-shipped-by-Walmart listings remain excluded.</p>
           </div>
           <fieldset id="match-options" class="match-panel">
             <legend>How keywords are matched</legend>
@@ -1535,7 +1554,7 @@ def home() -> HTMLResponse:
       Set a <strong>counterfeit review threshold</strong> to also flag sellers whose reviews frequently mention fake/counterfeit/knockoff products &mdash; this works across China, US, and Unknown alike, as long as the keyword still matches.
       Switch <strong>Search by</strong> to "Listing Brand" to instead pull every listing tagged with a specific seller-supplied Brand attribute (e.g. a private bulk-seller brand code) &mdash; brand mode trusts the listing's own Brand field exactly, it does not require the brand text to appear in the title.
       Set <strong>Target country</strong> to "Any (no country filter)" to pull every listing matching your keyword/brand regardless of country signal &mdash; useful for a pure brand sweep where you just want everything under that brand, not just the China/US-flagged subset.
-      Your <strong>Market</strong>, <strong>Target country</strong>, <strong>Search by</strong>, and <strong>Generic listing brands only</strong> choices are remembered in this browser between visits.
+      Your <strong>Market</strong>, <strong>Target country</strong>, <strong>Search by</strong>, and <strong>Listing brand matching</strong> choices are remembered in this browser between visits.
     </p>
   </div>
 """
@@ -1557,7 +1576,8 @@ def scan(
     match_description: bool = Query(default=False),
     counterfeit_min: str = Query(default=""),
     negative_keywords: str = Query(default=""),
-    generic_only: bool = Query(default=False),
+    generic_mode: Literal["standard", "only", "include"] = Query(default="standard"),
+    generic_only: bool = Query(default=False),  # legacy bookmarked scan URLs
     fuzzy: bool = Query(default=False),
     fuzzy_strictness: int = Query(default=DEFAULT_STRICTNESS, ge=0, le=100),
     disguised_search: bool = Query(default=False),
@@ -1577,8 +1597,9 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords), generic_only,
-                        fuzzy_strictness if fuzzy else None, disguised_search)
+    selected_generic_mode = "only" if generic_only else generic_mode
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords), selected_generic_mode == "only",
+                        fuzzy_strictness if fuzzy else None, disguised_search, selected_generic_mode == "include")
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1597,6 +1618,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="unknown-count">Unknown signal: 0</span>
       <span class="pill" id="excluded-count" hidden>Excluded by title: 0</span>
       <span class="pill" id="generic-only-pill" hidden title="Matches need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...). Any country of origin counts.">Generic brands only &middot; any country</span>
+      <span class="pill" id="generic-include-pill" hidden title="Regular listings need the target country; generic listing brands count from any country.">Standard + generic &middot; any country for generic</span>
       <span class="pill" id="fuzzy-pill" hidden>Fuzzy matching</span>
       <span class="pill" id="disguised-search-pill" hidden>Disguised spellings searched</span>
     </div>
@@ -1613,7 +1635,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <form id="resume-form" action="/job/{html_escape(job_id)}/resume" method="post" style="display:none; margin:0;">
         <button type="submit" class="button">Resume Scan</button>
       </form>
-      <a class="button" href="/queue?job={html_escape(job_id)}{'&amp;country_signal=all' if JOBS.get(job_id, {}).get('generic_only') else ''}">Open review queue</a>
+      <a class="button" href="/queue?job={html_escape(job_id)}{'&amp;country_signal=all' if JOBS.get(job_id, {}).get('generic_only') or JOBS.get(job_id, {}).get('generic_include') else ''}">Open review queue</a>
       <a class="button secondary" href="/queue?job={html_escape(job_id)}">Choose export</a>
       <a class="button secondary" href="/">New scan</a>
     </div>
@@ -1855,6 +1877,7 @@ async function refreshJob() {
   excludedPill.textContent = `Excluded by title: ${stats.excluded_total || 0}`;
   excludedPill.title = 'Excluded terms: ' + (data.negative_terms || []).join(', ');
 document.getElementById('generic-only-pill').hidden = !data.generic_only;
+document.getElementById('generic-include-pill').hidden = !data.generic_include;
 const fuzzyPill = document.getElementById('fuzzy-pill');
 fuzzyPill.hidden = data.fuzzy_strictness == null;
 fuzzyPill.textContent = `Fuzzy matching: strictness ${data.fuzzy_strictness}`;
