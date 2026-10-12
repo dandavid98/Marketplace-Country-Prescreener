@@ -10,3 +10,4 @@ prescreener.sqlite3
 ~$*
 .DS_Store
 *.log
+*.backup-*.sqlite3
