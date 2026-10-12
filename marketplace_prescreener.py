@@ -789,7 +789,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "total": max(len(search_plan), 1),
         "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."]
                 + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else [])
-                + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...)."] if generic_only else [])
+                + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...). Any country of origin counts; target country is ignored."] if generic_only else [])
                 + (["Disguise detection on: F3breze / F.e.b.r.e.z.e / lookalike letters count as the real keyword."] if search_type == "keyword" else [])
                 + ([f"Fuzzy matching on at strictness {fuzzy_strictness}: " + "; ".join(f"{w} allows {allowed_edits(w, fuzzy_strictness)} letter difference(s)" for kw in keywords for w in keyword_words(kw))] if fuzzy_strictness is not None else [])
                 + (["Also searching disguised spellings: " + ", ".join(q for kw, q in search_plan if q != kw)] if len(search_plan) > len(keywords) else []),
@@ -898,11 +898,14 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description, generic_only, fuzzy_strictness)
     # "Any" target country means no country filter -- every listing is
     # country-eligible regardless of what extract_signals found, so status
-    # depends purely on keyword_ok (or brand_ok). Otherwise, require an
-    # explicit match against the chosen target country, same as before.
-    country_ok = True if target_country == "Any" else (country_signal == target_country)
+    # depends purely on keyword_ok (or brand_ok). Generic-only searches ignore
+    # country too: a generic brand from ANY origin (US included) is a true
+    # positive. Otherwise, require an explicit match against the target country.
+    country_ok = target_country == "Any" or generic_only or country_signal == target_country
     if country_ok:
         evidence = f"{evidence_source}: {evidence}"
+        if generic_only and keyword_ok:
+            evidence = f"{evidence} (generic listing brand {listing_brand!r}; country of origin ignored for generic-only searches)"
         if not keyword_ok:
             if search_type == "brand":
                 evidence = f"{evidence} (listing brand {listing_brand or 'Unknown'!r} does not match target brand {keyword!r}, treating as non-match)"
@@ -1349,7 +1352,7 @@ def home() -> HTMLResponse:
               <input id="generic_only" name="generic_only" type="checkbox" value="true" aria-describedby="generic-only-hint" onchange="savePrescreenerPref('generic_only', this.checked)" style="width:auto;">
               Generic listing brands only
             </label>
-            <p class="tiny" id="generic-only-hint">Keyword must be in the title <strong>and</strong> the listing's Brand must be a placeholder like Generic, Unbranded, Unbrand, NOBRAND, No Brand, Unknown, N/A, None, OEM (capitals, spaces and punctuation ignored). Great for broad keywords like &ldquo;febreze&rdquo;.</p>
+            <p class="tiny" id="generic-only-hint">Keyword must be in the title <strong>and</strong> the listing's Brand must be a placeholder like Generic, Unbranded, Unbrand, NOBRAND, No Brand, Unknown, N/A, None, OEM (capitals, spaces and punctuation ignored). <strong>Any country of origin counts</strong> (China, US or unknown), so Target country is ignored. Great for broad keywords like &ldquo;febreze&rdquo;.</p>
           </div>
           <fieldset id="match-options" class="match-panel">
             <legend>How keywords are matched</legend>
@@ -1525,7 +1528,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="us-count">US / explicit non-China signal: 0</span>
       <span class="pill" id="unknown-count">Unknown signal: 0</span>
       <span class="pill" id="excluded-count" hidden>Excluded by title: 0</span>
-      <span class="pill" id="generic-only-pill" hidden title="Matches also need a placeholder Brand: Generic, Unbranded, NOBRAND, Unknown, ...">Generic brands only</span>
+      <span class="pill" id="generic-only-pill" hidden title="Matches need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...). Any country of origin counts.">Generic brands only &middot; any country</span>
       <span class="pill" id="fuzzy-pill" hidden>Fuzzy matching</span>
       <span class="pill" id="disguised-search-pill" hidden>Disguised spellings searched</span>
     </div>
@@ -1542,7 +1545,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <form id="resume-form" action="/job/{html_escape(job_id)}/resume" method="post" style="display:none; margin:0;">
         <button type="submit" class="button">Resume Scan</button>
       </form>
-      <a class="button" href="/queue?job={html_escape(job_id)}">Open review queue</a>
+      <a class="button" href="/queue?job={html_escape(job_id)}{'&amp;country_signal=all' if JOBS.get(job_id, {}).get('generic_only') else ''}">Open review queue</a>
       <a class="button secondary" href="/export.xlsx?job={html_escape(job_id)}">Export queue</a>
       <a class="button secondary" href="/">New scan</a>
     </div>
