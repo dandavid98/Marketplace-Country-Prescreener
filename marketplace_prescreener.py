@@ -24,6 +24,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+from brand_signals import is_generic_brand
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
 from ui_shell import STATIC_DIR, render_page
 
@@ -423,15 +424,19 @@ def term_matches_listing(
     description: str,
     listing_brand: str,
     match_description: bool,
+    generic_only: bool = False,
 ) -> bool:
     """Dispatch to the right match rule for the job's search type.
 
     Keeps `keyword_matches_listing` untouched (still used standalone by
     keyword-mode jobs); brand-mode jobs get their own exact-match rule via
-    `brand_matches` instead of a text-contains check.
+    `brand_matches` instead of a text-contains check. `generic_only` (keyword
+    mode only) additionally requires a generic placeholder Brand attribute.
     """
     if search_type == "brand":
         return brand_matches(term, listing_brand)
+    if generic_only and not is_generic_brand(listing_brand):
+        return False
     return keyword_matches_listing(term, title, description, match_description)
 
 
@@ -742,11 +747,12 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\n,]+", raw or "") if part.strip()]
 
 
-def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None) -> str:
+def create_job(keywords: list[str], country: str, limit: int, workers: int, mode: str, max_price: float | None = None, price_only: bool = False, match_description: bool = False, counterfeit_min: int | None = None, market: str = DEFAULT_MARKET, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: list[str] | None = None, generic_only: bool = False) -> str:
     global LATEST_JOB_ID
     job_id = uuid.uuid4().hex[:10]
     market_obj = get_market(market)
     search_type = search_type if search_type in ("keyword", "brand") else DEFAULT_SEARCH_TYPE
+    generic_only = bool(generic_only and search_type == "keyword")
     term_label = "listing brand" if search_type == "brand" else "keyword"
     job = {
         "id": job_id,
@@ -761,13 +767,15 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "price_only": bool(price_only and max_price is not None),
         "match_description": match_description,
         "negative_terms": list(negative_terms or []),
+        "generic_only": generic_only,
         "counterfeit_min": counterfeit_min,
         "status": "running",
         "message": "Queued",
         "current": 0,
         "total": max(len(keywords), 1),
         "logs": [f"Queued scan for {len(keywords)} {term_label}(s) targeting {country} on {market_obj.label}."]
-                + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else []),
+                + ([f"Excluding titles containing: {', '.join(negative_terms)}"] if negative_terms else [])
+                + (["Generic listing brands only: matches also need a placeholder Brand (Generic, Unbranded, NOBRAND, Unknown, ...)."] if generic_only else []),
         "results": [],
         "scanned": [],
         "stats": {"scanned_total": 0, "results_total": 0, "china_total": 0, "us_total": 0, "unknown_total": 0, "excluded_total": 0},
@@ -800,7 +808,7 @@ def _failed_scan(item_id: str, status: str, evidence: str) -> tuple[str, str, st
     return "Unknown", "", "", "", "Unknown", "Unknown", "Unknown", "product page", evidence, status, "", item_id, "", "Unknown", 0, ""
 
 
-def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = ()) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
+def scan_listing(keyword: str, listing_url: str, target_country: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False) -> tuple[str, str, str, str, str, str, str, str, str, str, str, str, str, str, int, str]:
     item_id = extract_item_id(listing_url)
     try:
         product_html = fetch_html(listing_url)
@@ -870,7 +878,7 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
 
     if seller_name == "Unknown" and seller_page_title:
         seller_name = seller_page_title
-    keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description)
+    keyword_ok = term_matches_listing(search_type, keyword, title, description, listing_brand, match_description, generic_only)
     # "Any" target country means no country filter -- every listing is
     # country-eligible regardless of what extract_signals found, so status
     # depends purely on keyword_ok (or brand_ok). Otherwise, require an
@@ -881,6 +889,8 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
         if not keyword_ok:
             if search_type == "brand":
                 evidence = f"{evidence} (listing brand {listing_brand or 'Unknown'!r} does not match target brand {keyword!r}, treating as non-match)"
+            elif generic_only and not is_generic_brand(listing_brand):
+                evidence = f"{evidence} (listing brand {listing_brand or 'none'!r} is not a generic brand, treating as non-match)"
             else:
                 where = "title or description" if match_description else "title"
                 evidence = f"{evidence} (keyword {keyword!r} not found in {where}, treating as non-match)"
@@ -888,9 +898,9 @@ def scan_listing(keyword: str, listing_url: str, target_country: str, match_desc
     return country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand
 
 
-def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = ()) -> tuple[ListingRecord, str]:
+def scan_listing_job(keyword: str, listing_url: str, target_country: str, search_url: str, match_description: bool = False, check_counterfeit: bool = False, market: Market | None = None, search_type: str = DEFAULT_SEARCH_TYPE, negative_terms: tuple[str, ...] = (), generic_only: bool = False) -> tuple[ListingRecord, str]:
     market = market or MARKETS[DEFAULT_MARKET]
-    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms)
+    country_signal, title, description, seller_page_url, seller_name, seller_id, ship_from, evidence_source, evidence, status, seller_page_title, item_id, image_url, price_text, counterfeit_review_count, listing_brand = scan_listing(keyword, listing_url, target_country, match_description, check_counterfeit, market, search_type, negative_terms, generic_only)
     record = ListingRecord(
         job_id="",
         keyword=keyword,
@@ -934,6 +944,7 @@ def run_job(job_id: str) -> None:
     price_only = bool(job.get("price_only") and max_price is not None)
     match_description = bool(job.get("match_description"))
     negative_terms = tuple(job.get("negative_terms") or ())
+    generic_only = bool(job.get("generic_only"))
     counterfeit_min = job.get("counterfeit_min")
     worker_cap = max(1, min(int(job.get("workers", LISTING_WORKERS)), MAX_LISTING_WORKERS))
     if mode == "fast":
@@ -1022,7 +1033,7 @@ def run_job(job_id: str) -> None:
                 # in "stopping" forever (Resume button never appeared).
                 pool = ThreadPoolExecutor(max_workers=worker_count)
                 futures = {
-                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms): listing_url
+                    pool.submit(scan_listing_job, keyword, listing_url, country, current_search_url, match_description, counterfeit_min is not None, market, search_type, negative_terms, generic_only): listing_url
                     for listing_url in new_urls
                 }
                 completed_urls: set[str] = set()
@@ -1040,7 +1051,7 @@ def run_job(job_id: str) -> None:
                             keyword_listing_count += 1
                             job["message"] = f"Finished scan {discovered} for {keyword!r} on page {pages_crawled}"
                         record.job_id = job_id
-                        keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description)
+                        keyword_ok = term_matches_listing(search_type, keyword, record.title, record.description, record.listing_brand, match_description, generic_only)
                         if status in ("walmart_sold", "excluded"):
                             # Sold-and-shipped-by-Walmart carries zero third-party
                             # risk, and excluded titles were filtered out on purpose:
@@ -1250,6 +1261,7 @@ function updateSearchTypeLabels() {
   document.getElementById('keywords-hint').textContent = isBrand
     ? 'One listing brand per line (exact match, case-insensitive). Every listing tagged with that brand is pulled, regardless of what the title says.'
     : 'One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.';
+  document.getElementById('generic-only-wrap').hidden = isBrand;
 }
 
 function savePrescreenerPref(key, value) {
@@ -1270,6 +1282,9 @@ function restorePrescreenerPrefs() {
   var country = localStorage.getItem('prescreener_country');
   var countrySelect = document.getElementById('country');
   if (country && countrySelect) countrySelect.value = country;
+
+  var genericOnly = document.getElementById('generic_only');
+  if (genericOnly) genericOnly.checked = localStorage.getItem('prescreener_generic_only') === 'true';
 
   updateSearchTypeLabels();
 }
@@ -1303,6 +1318,13 @@ def home() -> HTMLResponse:
           <label for="keywords" id="keywords-label">Keywords</label>
           <textarea id="keywords" name="keywords" placeholder="Example:\ndish soap\nlaundry detergent\npaper towels"></textarea>
           <p class="tiny" id="keywords-hint">One per line (or comma-separated). Each keyword is searched, then listings are matched by keyword-in-title.</p>
+          <div id="generic-only-wrap" style="margin-top:8px;">
+            <label style="display:flex; align-items:center; gap:8px; margin-bottom:0;">
+              <input id="generic_only" name="generic_only" type="checkbox" value="true" aria-describedby="generic-only-hint" onchange="savePrescreenerPref('generic_only', this.checked)" style="width:auto;">
+              Generic listing brands only
+            </label>
+            <p class="tiny" id="generic-only-hint">Keyword must be in the title <strong>and</strong> the listing's Brand must be a placeholder like Generic, Unbranded, Unbrand, NOBRAND, No Brand, Unknown, N/A, None, OEM (capitals, spaces and punctuation ignored). Great for broad keywords like &ldquo;febreze&rdquo;.</p>
+          </div>
           <label for="negative_keywords" style="margin-top:12px;">Exclude titles containing <span class="tiny">(optional)</span></label>
           <textarea id="negative_keywords" name="negative_keywords" style="min-height:72px;" aria-describedby="negative-hint" placeholder="Example:\ntool\nrefill"></textarea>
           <p class="tiny" id="negative-hint">One per line (or comma-separated). Any listing whose title contains one of these is skipped, even if it matches a keyword. Matches word starts, so &ldquo;tool&rdquo; also drops &ldquo;tools&rdquo; and &ldquo;toolkit&rdquo; but not &ldquo;stool&rdquo;. Applies to Listing Brand searches too.</p>
@@ -1390,7 +1412,7 @@ def home() -> HTMLResponse:
       Set a <strong>counterfeit review threshold</strong> to also flag sellers whose reviews frequently mention fake/counterfeit/knockoff products &mdash; this works across China, US, and Unknown alike, as long as the keyword still matches.
       Switch <strong>Search by</strong> to "Listing Brand" to instead pull every listing tagged with a specific seller-supplied Brand attribute (e.g. a private bulk-seller brand code) &mdash; brand mode trusts the listing's own Brand field exactly, it does not require the brand text to appear in the title.
       Set <strong>Target country</strong> to "Any (no country filter)" to pull every listing matching your keyword/brand regardless of country signal &mdash; useful for a pure brand sweep where you just want everything under that brand, not just the China/US-flagged subset.
-      Your <strong>Market</strong>, <strong>Target country</strong>, and <strong>Search by</strong> choices are remembered in this browser between visits.
+      Your <strong>Market</strong>, <strong>Target country</strong>, <strong>Search by</strong>, and <strong>Generic listing brands only</strong> choices are remembered in this browser between visits.
     </p>
   </div>
 """
@@ -1412,6 +1434,7 @@ def scan(
     match_description: bool = Query(default=False),
     counterfeit_min: str = Query(default=""),
     negative_keywords: str = Query(default=""),
+    generic_only: bool = Query(default=False),
 ) -> HTMLResponse:
     terms = split_keywords(keywords)
     if not terms:
@@ -1428,7 +1451,7 @@ def scan(
             parsed_counterfeit_min = max(0, int(float(counterfeit_min.strip())))
         except ValueError:
             parsed_counterfeit_min = None
-    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords))
+    job_id = create_job(terms, country, limit, workers, mode, parsed_max_price, price_only, match_description, parsed_counterfeit_min, market, search_type, split_keywords(negative_keywords), generic_only)
     threading.Thread(target=run_job, args=(job_id,), daemon=True).start()
     return RedirectResponse(url=f"/job/{job_id}", status_code=302)
 
@@ -1446,6 +1469,7 @@ def job_page(job_id: str) -> HTMLResponse:
       <span class="pill" id="us-count">US / explicit non-China signal: 0</span>
       <span class="pill" id="unknown-count">Unknown signal: 0</span>
       <span class="pill" id="excluded-count" hidden>Excluded by title: 0</span>
+      <span class="pill" id="generic-only-pill" hidden title="Matches also need a placeholder Brand: Generic, Unbranded, NOBRAND, Unknown, ...">Generic brands only</span>
     </div>
     <div class="status">
       <div><strong>What the app is doing right now</strong></div>
@@ -1701,6 +1725,7 @@ async function refreshJob() {
   excludedPill.hidden = !(data.negative_terms && data.negative_terms.length);
   excludedPill.textContent = `Excluded by title: ${stats.excluded_total || 0}`;
   excludedPill.title = 'Excluded terms: ' + (data.negative_terms || []).join(', ');
+document.getElementById('generic-only-pill').hidden = !data.generic_only;
   const visibleFor = rows => matchesOnly ? rows.filter(r => (r.scan_status || 'unknown') === 'match') : rows;
   const chinaVisible = visibleFor(chinaRows), usVisible = visibleFor(usRows), unknownVisible = visibleFor(unknownRows);
   const countSuffix = matchesOnly ? ' matches' : ' scanned';
