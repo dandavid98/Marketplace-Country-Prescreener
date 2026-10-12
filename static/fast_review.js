@@ -104,6 +104,8 @@
       $('fr-selected').textContent = '(' + n.toLocaleString() + ' selected' +
         (n > onScreen ? ', ' + (n - onScreen).toLocaleString() + ' not on screen' : '') + ')';
       document.querySelectorAll('[data-bulk], #fr-clear').forEach(function (b) { b.disabled = n === 0 || busy; });
+      $('export-selected').disabled = n === 0 || busy;
+      $('export-selected').textContent = 'Export selected (' + n.toLocaleString() + ')';
     }
 
     function setRange(from, to, action) {
@@ -149,6 +151,32 @@
       else table.getMatchingRows().forEach(function (r) { selected.add(r.id); });
       anchor = null;
       paint();
+    });
+
+    $('export-selected').addEventListener('click', function () {
+      if (busy || !selected.size) return;
+      var button = this;
+      button.disabled = true;
+      var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value });
+      fetch('/export.xlsx?' + query, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Array.from(selected))
+      }).then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.blob();
+      }).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = 'prescreener_selected_' + $('export-scope').value + '.xlsx';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+        say('Selected rows exported.', true);
+      }).catch(function (err) {
+        say('Could not export selected rows (' + err.message + ').', false, true);
+      }).then(function () { paint(); });
     });
 
     // ---------- bulk actions ----------

@@ -12,12 +12,13 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from html import escape as html_escape
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote_plus, urljoin, urlparse, parse_qs, urlencode, urlunparse
 from urllib.request import Request, urlopen
 
 from fastapi import Body, FastAPI, Query
+from starlette.background import BackgroundTask
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
@@ -741,14 +742,28 @@ def update_review_states(record_ids: list[int], review_state: str) -> tuple[int,
     return changed, cascaded
 
 
-def export_reviews_xlsx(job_id: str | None = None) -> Path:
+EXPORT_SCOPES = {
+    "all": "Whole scan", "match": "Confirmed matches", "approved": "Approved",
+    "pending": "Pending", "rejected": "Disputed", "not_queued": "Not queued",
+}
+ExportScope = Literal["all", "match", "approved", "pending", "rejected", "not_queued"]
+
+
+def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
+                        selected_ids: set[int] | None = None) -> Path:
     rows = get_reviews("all", job_id=job_id)
+    if scope == "match":
+        rows = [row for row in rows if row["scan_status"] == "match"]
+    elif scope != "all":
+        rows = [row for row in rows if row["review_state"] == scope]
+    if selected_ids is not None:
+        rows = [row for row in rows if row["id"] in selected_ids]
     any_counterfeit_checked = any(row.get("counterfeit_checked") for row in rows)
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Remembered"]
+    headers = ["Keyword", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Remembered"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
     ws.append(headers)
@@ -764,6 +779,7 @@ def export_reviews_xlsx(job_id: str | None = None) -> Path:
             row.get("price_text", ""),
             row.get("country_signal", ""),
             (row.get("match_kind") or "exact").capitalize(),
+            STATE_TAB_LABELS.get(row.get("review_state"), row.get("review_state", "")),
             REMEMBERED_LABELS.get(row.get("remembered") or "", ""),
         ]
         if any_counterfeit_checked:
@@ -1488,7 +1504,7 @@ def home() -> HTMLResponse:
       <div class="row-actions" style="margin-top:12px;">
         <button type="submit">Scan listings</button>
         <a class="button secondary" href="/queue">Review queue</a>
-        <a class="button secondary" href="/export.xlsx">Export queue</a>
+        <a class="button secondary" href="/queue">Choose export</a>
       </div>
     </form>
     <p class="muted" style="margin-top:12px;">
@@ -1580,7 +1596,7 @@ def job_page(job_id: str) -> HTMLResponse:
         <button type="submit" class="button">Resume Scan</button>
       </form>
       <a class="button" href="/queue?job={html_escape(job_id)}{'&amp;country_signal=all' if JOBS.get(job_id, {}).get('generic_only') else ''}">Open review queue</a>
-      <a class="button secondary" href="/export.xlsx?job={html_escape(job_id)}">Export queue</a>
+      <a class="button secondary" href="/queue?job={html_escape(job_id)}">Choose export</a>
       <a class="button secondary" href="/">New scan</a>
     </div>
     <div class="card inset" style="margin:0;">
@@ -1994,7 +2010,14 @@ QUEUE_ROW_FIELDS = (
 
 
 def _queue_scope(job: str) -> str | None:
-    return LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
+    if job != "latest":
+        return None if job == "all" else job
+    if LATEST_JOB_ID:
+        return LATEST_JOB_ID
+    # Live job state is in memory; after a restart, use the last saved scan.
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("select job_id from reviews order by id desc limit 1").fetchone()
+    return row[0] if row else "__no_scan__"
 
 
 @app.get("/api/queue")
@@ -2022,10 +2045,26 @@ def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...)) -> JSON
     return JSONResponse({"updated": updated, "cascaded": cascaded, "review_state": BULK_ACTIONS[action]})
 
 
+def export_controls(job: str, state: str = "all") -> str:
+    options = "".join(
+        f'<option value="{key}"{" selected" if key == state else ""}>{label}</option>'
+        for key, label in EXPORT_SCOPES.items()
+    )
+    return (f'<form action="/export.xlsx" method="get" class="export-controls">'
+            f'<input type="hidden" name="job" value="{html_escape(job, quote=True)}">'
+            f'<label for="export-scope">Export</label>'
+            f'<select id="export-scope" name="scope">{options}</select>'
+            f'<button type="submit" class="button secondary">Download XLSX</button>'
+            f'<button type="button" id="export-selected" class="button secondary" disabled>Export selected (0)</button>'
+            f'</form>')
+
+
 @app.get("/queue", response_class=HTMLResponse)
 def queue_page(state: str = Query(default="pending"), country_signal: str = Query(default="China"), job: str = Query(default="latest")) -> HTMLResponse:
     job_filter = _queue_scope(job)
-    scope_note = "Showing results from your most recent scan only." if job == "latest" else "Showing results from ALL scans ever run (full history)."
+    scope_note = ("Showing results from your most recent scan only." if job == "latest" else
+                  "Showing results from ALL scans ever run (full history)." if job == "all" else
+                  "Showing results from this scan only.")
     scope_toggle = (
         f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=all">View all scans (history)</a>'
         if job == "latest" else
@@ -2050,7 +2089,8 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
   <div class="card">
     <div class="top-actions">
       <a class="button" href="/">New scan</a>
-      <a class="button secondary" href="/export.xlsx?job={quote_plus(job)}">Export XLSX</a>
+      {export_controls(job, state if state in EXPORT_SCOPES else 'all')}
+      <span class="tiny">Exports use the scan shown and your chosen category; selected export uses checked rows within that category. Country and column filters do not apply to whole-category exports.</span>
       {scope_toggle}
     </div>
     <p class="tiny" style="margin: 6px 0 0;">{html_escape(scope_note)}</p>
@@ -2087,7 +2127,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         The header box selects every row that matches your filters, not just the ones on screen.
       </div>
       <div id="fr-status" class="fr-status" role="status" aria-live="polite"></div>
-      <div class="table-x"><table id="queue-table"></table></div>
+      <div class="fr-scroll" tabindex="0" aria-label="Review queue table, scrollable"><table id="queue-table"></table></div>
     </div>
   </div>
 """
@@ -2107,13 +2147,27 @@ def review_action(record_id: int, action: str, return_to: str = "/queue") -> Red
 
 
 @app.get("/export.xlsx")
-def export_xlsx(job: str = Query(default="latest")) -> FileResponse:
-    job_filter = LATEST_JOB_ID if job == "latest" else (None if job == "all" else job)
-    path = export_reviews_xlsx(job_id=job_filter)
+def export_xlsx(job: str = Query(default="latest"), scope: ExportScope = Query(default="all")) -> FileResponse:
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope)
+    return _xlsx_response(path, scope)
+
+
+@app.post("/export.xlsx")
+def export_selected_xlsx(ids: list[int] = Body(...), job: str = Query(default="latest"),
+                         scope: ExportScope = Query(default="all")) -> FileResponse:
+    """Export checked queue records only, within the requested scan and scope."""
+    if len(ids) > 5000:
+        return JSONResponse({"error": "Select at most 5,000 rows per export"}, status_code=400)
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, selected_ids=set(ids))
+    return _xlsx_response(path, scope)
+
+
+def _xlsx_response(path: Path, scope: ExportScope) -> FileResponse:
     return FileResponse(
         path,
-        filename="prescreener_review_queue.xlsx",
+        filename=f"prescreener_{scope}.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        background=BackgroundTask(path.unlink, missing_ok=True),
     )
 
 
