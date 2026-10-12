@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -187,7 +189,18 @@ def is_bot_challenge(html: str) -> bool:
 
 def fetch_html(url: str, timeout: int = SEARCH_TIMEOUT) -> str:
     request = Request(url, headers={"User-Agent": USER_AGENT})
-    with urlopen(request, timeout=timeout) as response:
+    try:
+        response = urlopen(request, timeout=timeout)
+    except URLError as exc:
+        # Some launch environments set SSL_CERT_FILE to a bundle missing the
+        # public issuer. On macOS, retry with the OS CA bundle; never disable TLS.
+        system_ca = Path("/etc/ssl/cert.pem")
+        if (sys.platform != "darwin" or not system_ca.is_file()
+                or not isinstance(exc.reason, ssl.SSLCertVerificationError)):
+            raise
+        context = ssl.create_default_context(cafile=str(system_ca))
+        response = urlopen(request, timeout=timeout, context=context)
+    with response:
         charset = response.headers.get_content_charset() or "utf-8"
         html = response.read().decode(charset, errors="replace")
     if is_bot_challenge(html):
