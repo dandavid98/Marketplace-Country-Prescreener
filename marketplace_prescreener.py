@@ -2257,7 +2257,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         <strong>Click</strong> a box to select &middot; <strong>Shift+click</strong> another box to select the whole range (Shift+click on a ticked range unticks it) &middot;
         <kbd>J</kbd>/<kbd>K</kbd> move down/up &middot; <kbd>Space</kbd> toggle row &middot; <kbd>Shift</kbd>+<kbd>J</kbd>/<kbd>K</kbd> extend selection &middot;
         <kbd>Shift</kbd>+<kbd>A</kbd> approve &middot; <kbd>Shift</kbd>+<kbd>D</kbd> dispute &middot; <kbd>Shift</kbd>+<kbd>Z</kbd> not set &middot; <kbd>Esc</kbd> clear.
-        The header box selects every row that matches your filters, not just the ones on screen.
+        The header box selects only rows currently shown. Choose <strong>All</strong> under Rows to add and click Show more to display every matching row first.
       </div>
       <div id="fr-status" class="fr-status" role="status" aria-live="polite"></div>
       <dialog id="fr-filter-dialog" class="fr-filter-dialog" aria-labelledby="fr-filter-title">

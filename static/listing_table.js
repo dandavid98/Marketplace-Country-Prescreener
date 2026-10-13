@@ -166,7 +166,7 @@
     pagination.addEventListener('click', function (e) {
       if (!e.target.closest('.show-more')) return;
       var choice = pagination.querySelector('.show-more-count');
-      state.limit += choice ? Number(choice.value) : pageSize;
+      state.limit = choice && choice.value === 'all' ? Infinity : state.limit + (choice ? Number(choice.value) : pageSize);
       render();
     });
 
@@ -240,7 +240,8 @@
           ? ' <span class="show-more-controls"><button type="button" class="button secondary show-more">Show more</button>' +
             '<label>Rows to add <select class="show-more-count" aria-label="Rows to add">' +
             moreChoices.map(function (count) {
-              return '<option value="' + count + '"' + (String(count) === selectedCount ? ' selected' : '') + '>' + count.toLocaleString() + '</option>';
+              return '<option value="' + count + '"' + (String(count) === selectedCount ? ' selected' : '') + '>' +
+                (count === 'all' ? 'All' : count.toLocaleString()) + '</option>';
             }).join('') + '</select></label></span>'
           : ' <button type="button" class="button secondary show-more">Show ' + Math.min(pageSize, next) + ' more</button>';
         foot = 'Showing ' + shown.length + ' of ' + rows.length + (filtered ? ' matching' : '') + controls;

@@ -95,6 +95,8 @@ class QueueSelectionTests(unittest.TestCase):
                 self.assertTrue(boxes.first.is_checked())
                 self.assertIn("1 selected", page.locator("#fr-selected").inner_text())
                 page.locator(".fr-all").click()
+                self.assertEqual([box.is_checked() for box in boxes.all()], [True, True])
+                page.locator(".fr-all").click()
                 self.assertEqual([box.is_checked() for box in boxes.all()], [False, False])
                 page.get_by_role("searchbox", name="Filter by Listing Brand").fill("")
                 self.assertEqual(boxes.count(), 4)
@@ -121,7 +123,7 @@ class QueueSelectionTests(unittest.TestCase):
                                 page.locator(".fr-actions").bounding_box()["x"])
                 self.assertEqual(rows.count(), 100)
                 self.assertEqual(page.locator(".show-more-count option").all_text_contents(),
-                                 ["100", "500", "2,000", "5,000", "10,000"])
+                                 ["100", "500", "2,000", "5,000", "10,000", "All"])
                 rows.first.locator("input[data-select-id]").click()
                 page.locator(".show-more").click()
                 self.assertEqual(rows.count(), 200)
@@ -142,6 +144,53 @@ class QueueSelectionTests(unittest.TestCase):
                 browser.close()
 
 
+    def test_header_selects_only_shown_rows_and_all_expands_filtered_rows(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
+            try:
+                page = browser.new_page()
+                rows = [dict(id=i, item_id=str(i), review_state='pending', scan_status='match',
+                             title=f'Listing {i}', listing_brand='Generic' if i <= 125 else 'Febreze')
+                        for i in range(1, 261)]
+                page.route('**/api/queue?*', lambda route: route.fulfill(json=rows))
+                page.goto(URL)
+                boxes = page.locator('input[data-select-id]')
+                boxes.first.wait_for()
+                self.assertEqual(boxes.count(), 100)
+                header = page.get_by_role('checkbox', name='Select all rows currently shown')
+                header.click()
+                self.assertTrue(header.is_checked())
+                self.assertIn('100 selected', page.locator('#fr-selected').inner_text())
+                page.locator('.show-more-count').select_option('100')
+                page.locator('.show-more').click()
+                self.assertEqual(boxes.count(), 200)
+                self.assertFalse(header.is_checked())
+                self.assertEqual(header.evaluate('el => el.indeterminate'), True)
+                header.click()
+                self.assertIn('200 selected', page.locator('#fr-selected').inner_text())
+                header.click()
+                self.assertTrue(all(not box.is_checked() for box in boxes.all()))
+                page.locator('.show-more-count').select_option('all')
+                page.locator('.show-more').click()
+                self.assertEqual(boxes.count(), 260)
+                self.assertIn('Showing 260 of 260', page.locator('#fr-pagination').inner_text())
+                header.click()
+                self.assertIn('260 selected', page.locator('#fr-selected').inner_text())
+                page.get_by_role('searchbox', name='Filter by Listing Brand').fill('Generic')
+                self.assertEqual(boxes.count(), 100)  # filtering resets the display limit
+                self.assertTrue(header.is_checked())
+                self.assertIn('160 not on screen', page.locator('#fr-selected').inner_text())
+                header.click()
+                self.assertIn('160 selected', page.locator('#fr-selected').inner_text())
+                page.locator('.show-more-count').select_option('all')
+                page.locator('.show-more').click()
+                self.assertEqual(boxes.count(), 125)
+                self.assertEqual(header.evaluate('el => el.indeterminate'), True)
+                header.click()
+                self.assertIn('260 selected', page.locator('#fr-selected').inner_text())
+            finally:
+                browser.close()
+
     def test_over_5000_selected_rows_preview_without_writing(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
@@ -161,6 +210,8 @@ class QueueSelectionTests(unittest.TestCase):
                 page.route('**/api/review/bulk', lambda route: self.fail('Cancel must never save'))
                 page.goto(URL)
                 page.get_by_text('6,005 of 6,005 rows').first.wait_for()
+                page.locator('.show-more-count').select_option('all')
+                page.locator('.show-more').click()
                 page.locator('.fr-all').click()
                 self.assertIn('6,005 selected', page.locator('#fr-selected').inner_text())
                 page.locator('[data-bulk="reject"]').click()

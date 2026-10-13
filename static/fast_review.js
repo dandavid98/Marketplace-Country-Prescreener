@@ -1,7 +1,7 @@
 /* fast_review.js - Review queue "Fast Review", modelled on ProductWatch's FastReviewTable:
    - checkbox column; Gmail-style shift-click range select (the range takes the anchor
      click's action, so shift-clicking can also UN-select a range), anchor moves on click
-   - header box = select / clear every row matching the current filters (not just on-screen)
+   - header box = select / clear rows currently shown (not hidden rows)
    - toolbar: "N rows (M selected)" + Approve / Dispute / Not set / Clear icon buttons
    - keyboard (PW bindings): j/k move, Space toggle, Shift+J/K extend,
      Shift+A approve, Shift+D dispute, Shift+Z not set, Esc clear
@@ -93,7 +93,7 @@
 
     var selectColumn = {
       key: 'select', label: 'Select', thClass: 'col-select', tdClass: 'cell-select',
-      headerHtml: '<input type="checkbox" class="fr-all" aria-label="Select all rows matching the filters">',
+      headerHtml: '<input type="checkbox" class="fr-all" aria-label="Select all rows currently shown">',
       cell: function (r) {
         var on = selected.has(r.id);
         return '<label class="fr-box"><input type="checkbox" data-select-id="' + esc(r.id) + '"' +
@@ -103,7 +103,7 @@
 
     var table = ListingTable.create(tableEl, {
       pageSize: 100,
-      showMoreChoices: [100, 500, 2000, 5000, 10000],
+      showMoreChoices: [100, 500, 2000, 5000, 10000, 'all'],
       paginationTarget: $('fr-pagination'),
       storageKey: 'prescreener_queue',
       emptyText: 'No items in this queue view.',
@@ -186,13 +186,13 @@
         if (box) box.checked = on;
       }
       var all = tableEl.querySelector('.fr-all');
-      if (all) {
-        all.checked = matchingCount > 0 && selected.size >= matchingCount;
-        all.indeterminate = selected.size > 0 && selected.size < matchingCount;
-      }
-      var n = selected.size;
       var onScreen = 0;
       shown.forEach(function (r) { if (selected.has(r.id)) onScreen++; });
+      if (all) {
+        all.checked = shown.length > 0 && onScreen === shown.length;
+        all.indeterminate = onScreen > 0 && onScreen < shown.length;
+      }
+      var n = selected.size;
       $('fr-rowcount').textContent = table.getRows().length ? matchingCount.toLocaleString() + ' of ' +
         table.getRows().length.toLocaleString() + ' rows' : '0 rows';
       $('fr-selected').hidden = n === 0;
@@ -259,8 +259,12 @@
     });
     tableEl.tHead.addEventListener('change', function (e) {
       if (!e.target.classList.contains('fr-all')) return;
-      if (selected.size > 0) selected.clear();         // PW: any selection -> clear; none -> select all
-      else table.getMatchingRows().forEach(function (r) { selected.add(r.id); });
+      var visibleIds = shown.map(function (r) { return r.id; });
+      if (visibleIds.length && visibleIds.every(function (id) { return selected.has(id); })) {
+        visibleIds.forEach(function (id) { selected.delete(id); });
+      } else {
+        visibleIds.forEach(function (id) { selected.add(id); });
+      }
       anchor = null;
       paint();
     });
