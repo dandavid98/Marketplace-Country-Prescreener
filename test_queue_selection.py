@@ -142,6 +142,38 @@ class QueueSelectionTests(unittest.TestCase):
                 browser.close()
 
 
+    def test_over_5000_selected_rows_preview_without_writing(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
+            try:
+                page = browser.new_page()
+                total = 6005
+                rows = [dict(id=i, item_id=str(i), review_state='pending', scan_status='match',
+                             title=f'Listing {i}', listing_brand='Generic') for i in range(1, total + 1)]
+                page.route('**/api/queue?*', lambda route: route.fulfill(json=rows))
+                preview_ids = []
+                def preview(route):
+                    preview_ids.extend(route.request.post_data_json['ids'])
+                    route.fulfill(json={'rows': total, 'items': total, 'pending_repeats': 0,
+                                        'remembered_repeats': 0, 'without_item_id': 0,
+                                        'walmart_rows': 0, 'action': 'reject'})
+                page.route('**/api/review/preview', preview)
+                page.route('**/api/review/bulk', lambda route: self.fail('Cancel must never save'))
+                page.goto(URL)
+                page.get_by_text('6,005 of 6,005 rows').first.wait_for()
+                page.locator('.fr-all').click()
+                self.assertIn('6,005 selected', page.locator('#fr-selected').inner_text())
+                page.locator('[data-bulk="reject"]').click()
+                page.locator('#fr-preview').wait_for(state='visible')
+                self.assertEqual(len(preview_ids), total)
+                self.assertEqual(len(set(preview_ids)), total)
+                self.assertIn('6,005 selected saved rows', page.locator('#fr-preview-text').inner_text())
+                page.locator('#fr-cancel').click()
+                self.assertTrue(page.locator('#fr-preview').is_hidden())
+                self.assertIn('6,005 selected', page.locator('#fr-selected').inner_text())
+            finally:
+                browser.close()
+
     def test_triage_grouping_and_preview_cancel_do_not_write(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)

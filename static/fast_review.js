@@ -325,10 +325,11 @@
     function bulk(action, ids) {
       if (busy || previewBusy || !$('fr-preview').hidden || $('fr-filter-dialog').open) return;
       if (!ids.length) return;
-      var selectedDisplay = table.getRows().filter(function (row) { return ids.indexOf(row.id) !== -1; });
+      var selectedSet = new Set(ids);
+      var selectedDisplay = table.getRows().filter(function (row) { return selectedSet.has(row.id); });
       var rowIds = directIds(selectedDisplay);
-      if (!rowIds.length || rowIds.length > 5000) {
-        say('Choose at most 5,000 saved rows per decision. Narrow the lane or selection first.', false, true);
+      if (!rowIds.length) {
+        say('Select at least one saved row.', false, true);
         return;
       }
       previewBusy = true;

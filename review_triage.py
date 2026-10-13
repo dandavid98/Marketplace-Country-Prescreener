@@ -38,8 +38,8 @@ def preview(db_path: Path, ids: list[int], action: str, scope: str | None) -> di
     Preview is advisory: the confirmation endpoint must revalidate scope and action.
     """
     ids = list(dict.fromkeys(ids))
-    if not ids or len(ids) > 5000:
-        raise ValueError("Select between 1 and 5,000 rows per decision")
+    if not ids:
+        raise ValueError("Select at least one row per decision")
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         direct = []

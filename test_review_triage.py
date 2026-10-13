@@ -53,11 +53,39 @@ class ReviewTriageTests(unittest.TestCase):
         self.assertEqual(review_triage.preview(self.db, [3], "reject", "scan-a")["walmart_rows"], 1)
         with self.assertRaisesRegex(ValueError, "no longer belong"):
             review_triage.preview(self.db, [1, 2], "reject", "scan-a")
-        with self.assertRaisesRegex(ValueError, "between 1 and 5,000"):
+        with self.assertRaisesRegex(ValueError, "at least one"):
             review_triage.preview(self.db, [], "reject", None)
-        with self.assertRaisesRegex(ValueError, "between 1 and 5,000"):
-            review_triage.preview(self.db, list(range(5001)), "reject", None)
         self.assertEqual(review_triage.preview(self.db, [1, 1], "reject", None)["rows"], 1)
+
+    def test_large_decision_is_atomic_and_cascades_on_copy(self):
+        ids = list(range(1000, 7005))
+        with sqlite3.connect(self.db) as conn:
+            conn.executemany("""insert into reviews
+                (id,job_id,item_id,scan_status,review_state,keyword,search_url,listing_url,title,seller_name,
+                 ship_from_country,target_country,country_signal,evidence,created_at)
+                 values (?, 'bulk-scan', ?, 'match', 'pending', 'soap', '', '', 'soap', 'Seller', '', 'China',
+                         'China', '', '2026-01-01')""",
+                             ((rid, str(rid)) for rid in ids))
+            conn.execute("""insert into reviews
+                (id,job_id,item_id,scan_status,review_state,keyword,search_url,listing_url,title,seller_name,
+                 ship_from_country,target_country,country_signal,evidence,created_at)
+                 values (8000, 'other-scan', '1000', 'match', 'pending', 'soap', '', '', 'soap', 'Seller', '',
+                         'China', 'China', '', '2026-01-01')""")
+        info = review_triage.preview(self.db, ids, 'reject', 'bulk-scan')
+        self.assertEqual((info['rows'], info['items'], info['pending_repeats']), (6005, 6005, 1))
+        self.assertEqual(app.api_review_bulk('reject', ids + [1], 'bulk-scan', True).status_code, 400)
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute("select count(*) from reviews where review_state = 'rejected'").fetchone()[0], 0)
+        result = app.api_review_bulk('reject', ids, 'bulk-scan', True)
+        self.assertEqual(result.status_code, 200)
+        import json
+        self.assertEqual(json.loads(result.body)['updated'], 6005)
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute("select count(*) from reviews where review_state = 'rejected'").fetchone()[0], 6006)
+            self.assertEqual(conn.execute('select count(*) from review_memory').fetchone()[0], 6005)
+        self.assertEqual(app.api_review_bulk('approve', ids, 'bulk-scan', True).status_code, 200)
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute("select count(*) from reviews where job_id = 'bulk-scan' and review_state = 'approved'").fetchone()[0], 6005)
 
     def test_no_write_without_confirmation_or_invalid_scope(self):
         self.assertEqual(app.api_review_preview("reject", [1], "scan-a").status_code, 200)
