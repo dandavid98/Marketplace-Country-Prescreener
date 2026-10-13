@@ -8,6 +8,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 import marketplace_prescreener as app
+import review_categories
 
 
 class ExportTests(unittest.TestCase):
@@ -30,8 +31,8 @@ class ExportTests(unittest.TestCase):
                 (5, "scan-b", "match", "approved", "China", "other scan", "item-5", "url-5", ""),
             ])
 
-    def export_keywords(self, job_id=None, scope="all", selected_ids=None):
-        path = app.export_reviews_xlsx(job_id=job_id, scope=scope, selected_ids=selected_ids)
+    def export_keywords(self, job_id=None, scope="all", selected_ids=None, category=""):
+        path = app.export_reviews_xlsx(job_id=job_id, scope=scope, selected_ids=selected_ids, category=category)
         self.addCleanup(path.unlink, missing_ok=True)
         workbook = load_workbook(path, read_only=True)
         try:
@@ -62,6 +63,42 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self.export_keywords("scan-a", "approved", {1, 2, 5})], ["approved"])
         self.assertEqual([row[0] for row in self.export_keywords("scan-a", "match", {3, 4, 5})], ["disputed"])
         self.assertEqual(self.export_keywords("scan-a", "all", set()), [])
+
+    def test_category_filter_intersects_status_scan_and_selection(self):
+        first = 'Trademark Infringement Media'
+        second = 'IP Rights Infringement Utility Outdoor & Maintenence'
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.executemany('update reviews set review_category = ? where id = ?',
+                             [(first, 1), (first, 2), (second, 4), (first, 5)])
+        self.assertEqual([row[0] for row in self.export_keywords('scan-a', 'approved', category=first)],
+                         ['approved'])
+        self.assertEqual(self.export_keywords('scan-a', 'approved', category=second), [])
+        self.assertEqual({row[0] for row in self.export_keywords('scan-a', 'all', category=first)},
+                         {'pending', 'approved'})
+        self.assertEqual([row[0] for row in self.export_keywords('scan-a', 'not_queued', category=second)],
+                         ['not queued'])
+        self.assertEqual(self.export_keywords('scan-a', 'approved', {2}, category=second), [])
+        self.assertEqual([row[0] for row in self.export_keywords('scan-a', 'approved', {2, 5}, first)],
+                         ['approved'])
+        with self.assertRaises(ValueError):
+            self.export_keywords('scan-a', 'approved', category='Not a real category')
+
+    def test_category_filter_via_download_routes(self):
+        category = review_categories.CATEGORIES[0]
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.execute('update reviews set review_category = ? where id in (2, 5)', (category,))
+        response = app.export_xlsx(job='scan-a', scope='approved', category=category)
+        self.addCleanup(response.path.unlink, missing_ok=True)
+        sheet = list(load_workbook(response.path, read_only=True).active.values)
+        self.assertEqual(len(sheet), 2)
+        self.assertEqual(sheet[1][sheet[0].index('Review Category')], category)
+        response = app.export_selected_xlsx([2, 5], job='scan-a', scope='approved', category=category)
+        self.addCleanup(response.path.unlink, missing_ok=True)
+        self.assertEqual(len(list(load_workbook(response.path, read_only=True).active.values)), 2)
+        for response in (app.export_xlsx(job='scan-a', scope='approved', category='Not a real category'),
+                         app.export_selected_xlsx([2], job='scan-a', scope='approved',
+                                                  category='Not a real category')):
+            self.assertEqual(response.status_code, 400)
 
     def test_category_exported_for_pending_and_approved_rows(self):
         with sqlite3.connect(app.DB_PATH) as conn:
@@ -123,6 +160,9 @@ class ExportTests(unittest.TestCase):
         self.assertIn('value="match"', page)
         self.assertIn('id="export-selected"', page)
         self.assertIn('name="job" value="scan-a"', page)
+        self.assertIn('id="export-category" name="category"', page)
+        self.assertIn('<option value="">All categories</option>', page)
+        self.assertIn('IP Rights Infringement Utility Outdoor &amp; Maintenence', page)
 
 
 if __name__ == "__main__":

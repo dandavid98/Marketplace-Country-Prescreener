@@ -298,7 +298,8 @@
       button.disabled = true;
       var ids = directIds(selectedRows());
       if (!ids.length) return;
-      var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value });
+      var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value,
+        category: $('export-category').value });
       fetch('/export.xlsx?' + query, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ids)

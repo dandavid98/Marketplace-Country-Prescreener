@@ -786,7 +786,9 @@ ExportScope = Literal["all", "match", "approved", "pending", "rejected", "not_qu
 
 
 def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
-                        selected_ids: set[int] | None = None) -> Path:
+                        selected_ids: set[int] | None = None, category: str = "") -> Path:
+    if category and category not in review_categories.CATEGORIES:
+        raise ValueError("Unknown review category")
     rows = get_reviews("all", job_id=job_id)
     if scope == "match":
         rows = [row for row in rows if row["scan_status"] == "match"]
@@ -794,6 +796,8 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
         rows = [row for row in rows if row["review_state"] == scope]
     if selected_ids is not None:
         rows = [row for row in rows if row["id"] in selected_ids]
+    if category:
+        rows = [row for row in rows if row.get("review_category") == category]
     any_counterfeit_checked = any(row.get("counterfeit_checked") for row in rows)
 
     wb = Workbook()
@@ -2155,10 +2159,16 @@ def export_controls(job: str, state: str = "all") -> str:
         f'<option value="{key}"{" selected" if key == state else ""}>{label}</option>'
         for key, label in EXPORT_SCOPES.items()
     )
+    category_options = "".join(
+        f'<option value="{html_escape(name, quote=True)}">{html_escape(name)}</option>'
+        for name in review_categories.CATEGORIES
+    )
     return (f'<form action="/export.xlsx" method="get" class="export-controls">'
             f'<input type="hidden" name="job" value="{html_escape(job, quote=True)}">'
             f'<label for="export-scope">Export</label>'
             f'<select id="export-scope" name="scope">{options}</select>'
+            f'<label for="export-category">Category</label>'
+            f'<select id="export-category" name="category"><option value="">All categories</option>{category_options}</select>'
             f'<button type="submit" class="button secondary">Download XLSX</button>'
             f'<button type="button" id="export-selected" class="button secondary" disabled>Export selected (0)</button>'
             f'</form>')
@@ -2204,7 +2214,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <div class="top-actions">
       <a class="button" href="/">New scan</a>
       {export_controls(job, state if state in EXPORT_SCOPES else 'all')}
-      <span class="tiny">Exports use the scan shown and your chosen category; selected export uses checked rows within that category. Country and column filters do not apply to whole-category exports.</span>
+      <span class="tiny">Exports use the scan shown, your chosen review status and export category; selected export uses checked rows within both. Country and column filters do not apply to whole-category exports.</span>
       {scope_toggle}
     </div>
     <p class="tiny" style="margin: 6px 0 0;">{html_escape(scope_note)}</p>
@@ -2289,18 +2299,23 @@ def review_action(record_id: int, action: str, return_to: str = "/queue") -> Red
 
 
 @app.get("/export.xlsx")
-def export_xlsx(job: str = Query(default="latest"), scope: ExportScope = Query(default="all")) -> FileResponse:
-    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope)
+def export_xlsx(job: str = Query(default="latest"), scope: ExportScope = Query(default="all"),
+                category: str = Query(default="")) -> FileResponse:
+    if category and category not in review_categories.CATEGORIES:
+        return JSONResponse({"error": "Unknown review category"}, status_code=400)
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, category=category)
     return _xlsx_response(path, scope)
 
 
 @app.post("/export.xlsx")
 def export_selected_xlsx(ids: list[int] = Body(...), job: str = Query(default="latest"),
-                         scope: ExportScope = Query(default="all")) -> FileResponse:
-    """Export checked queue records only, within the requested scan and scope."""
+                         scope: ExportScope = Query(default="all"), category: str = Query(default="")) -> FileResponse:
+    """Export checked queue records only, within the requested scan, scope and category."""
     if len(ids) > 5000:
         return JSONResponse({"error": "Select at most 5,000 rows per export"}, status_code=400)
-    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, selected_ids=set(ids))
+    if category and category not in review_categories.CATEGORIES:
+        return JSONResponse({"error": "Unknown review category"}, status_code=400)
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, selected_ids=set(ids), category=category)
     return _xlsx_response(path, scope)
 
 
