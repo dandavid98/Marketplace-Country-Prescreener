@@ -89,6 +89,7 @@
       BASE_COLUMNS.slice(0, titleIndex), opts.afterTitleColumns || [],
       BASE_COLUMNS.slice(titleIndex), opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
+    var moreChoices = opts.showMoreChoices || null;
     var state = { rows: [], sortKey: null, sortDir: 'none', filters: {}, limit: pageSize, optionSigs: {} };
     var byKey = {};
     columns.forEach(function (c) { byKey[c.key] = c; });
@@ -163,7 +164,8 @@
     table.tHead.addEventListener('change', onFilter);
     tfoot.addEventListener('click', function (e) {
       if (!e.target.closest('.show-more')) return;
-      state.limit += pageSize;
+      var choice = tfoot.querySelector('.show-more-count');
+      state.limit += choice ? Number(choice.value) : pageSize;
       render();
     });
 
@@ -230,8 +232,17 @@
 
       var foot = '';
       if (rows.length > shown.length) {
-        foot = 'Showing ' + shown.length + ' of ' + rows.length + (filtered ? ' matching' : '') +
-               ' <button type="button" class="button secondary show-more">Show ' + Math.min(pageSize, rows.length - shown.length) + ' more</button>';
+        var next = rows.length - shown.length;
+        var controls = moreChoices
+          ? ' <span class="show-more-controls"><button type="button" class="button secondary show-more">Show more</button>' +
+            '<label>Rows to add <select class="show-more-count" aria-label="Rows to add">' +
+            moreChoices.map(function (count) {
+              return '<option value="' + count + '">' + count.toLocaleString() + '</option>';
+            }).join('') + '</select></label></span>'
+          : ' <button type="button" class="button secondary show-more">Show ' + Math.min(pageSize, next) + ' more</button>';
+        foot = 'Showing ' + shown.length + ' of ' + rows.length + (filtered ? ' matching' : '') + controls;
+      } else if (moreChoices && rows.length) {
+        foot = 'Showing ' + shown.length + ' of ' + rows.length + (filtered ? ' matching' : '');
       } else if (filtered && rows.length) {
         foot = rows.length + ' of ' + state.rows.length + ' rows match';
       }

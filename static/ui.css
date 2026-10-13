@@ -382,6 +382,10 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .table-scroll .listing-table thead tr.filter-row th, .fr-scroll .listing-table thead tr.filter-row th { top: var(--filter-row-top, 37px); }
 .listing-table tfoot td { border-bottom: 0; }
 .listing-table tfoot .button { height: 26px; margin-left: 8px; font-size: 12px; }
+.show-more-controls { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.show-more-controls label { display: inline-flex; align-items: center; gap: 6px; }
+.show-more-count { font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); }
+.show-more-count:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .listing-table td.table-actions .button { margin-bottom: 6px; }
 
 /* ---------- misc app pieces --------------------------------------------------- */
