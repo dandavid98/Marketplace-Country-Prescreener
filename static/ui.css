@@ -347,6 +347,24 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .fr-triage label { display: inline-flex; align-items: center; gap: 5px; }
 .fr-copy-detail td { background: var(--muted); padding: 8px 16px; }
 .fr-copy-item { padding: 4px 0; overflow-wrap: anywhere; }
+.fr-filter-dialog { width: min(720px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; background: var(--card); color: var(--foreground); }
+.fr-filter-dialog::backdrop { background: rgb(0 0 0 / .55); }
+.fr-filter-head, .fr-filter-footer, .fr-filter-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.fr-filter-head, .fr-filter-footer { justify-content: space-between; }
+.fr-filter-head h3 { margin: 0; }
+.fr-filter-tabs { margin: 14px 0; }
+.fr-filter-tabs [aria-pressed="true"] { background: var(--nav-active-bg); color: var(--nav-active-text); }
+.fr-rule-group { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius); margin: 12px 0; padding: 12px; }
+.fr-rule-group legend { padding: 0 6px; }
+.fr-rule-group .fr-rule-group { margin-left: 14px; border-left: 3px solid var(--nav-active-text); }
+.fr-rule { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.fr-rule label, .fr-rule-group > label { display: inline-flex; flex-direction: column; gap: 4px; min-width: 120px; font-size: 12px; }
+.fr-rule select, .fr-rule input, .fr-rule-group select { max-width: 190px; height: 34px; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; }
+.fr-rule input { max-width: 220px; }
+#fr-filter-json-area label { display: block; margin-bottom: 6px; }
+#fr-filter-source { display: block; width: 100%; min-height: 260px; padding: 10px; resize: vertical; background: var(--card); color: var(--foreground); border: 1px solid var(--border); border-radius: var(--radius); font: 13px/1.5 var(--font-mono); }
+.fr-filter-footer { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+.fr-filter-dialog [hidden] { display: none; }
 .fr-preview[hidden] { display: none; }
 .fr-preview { position: fixed; z-index: 100; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(540px, calc(100vw - 32px)); padding: 20px; background: var(--card); border: 2px solid var(--ring); border-radius: var(--radius); box-shadow: 0 0 0 100vmax rgb(0 0 0 / .55); }
 .fr-preview h3 { margin-top: 0; }

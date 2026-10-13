@@ -46,6 +46,11 @@
     var expanded = new Set();
     var pendingDecision = null;
     var previewBusy = false;
+    var builder = ReviewFilterBuilder.build({
+      blocked: function () { return busy || previewBusy || !$('fr-preview').hidden; },
+      onApply: function () { selected.clear(); expanded.clear(); refreshView(); },
+      onClose: function () { $('fr-filter-open').focus(); }
+    });
 
     function directIds(rows) {
       return Array.from(new Set(rows.reduce(function (ids, row) {
@@ -57,7 +62,7 @@
       return table.getRows().filter(function (row) { return selected.has(row.id); });
     }
     function counts() {
-      var summary = ReviewTriage.counts(sourceRows);
+      var summary = ReviewTriage.counts(sourceRows.filter(builder.matches));
       $('fr-lanes').innerHTML = ReviewTriage.lanes.map(function (entry) {
         var s = summary[entry[0]];
         return '<option value="' + entry[0] + '"' + (lane === entry[0] ? ' selected' : '') + '>' +
@@ -67,7 +72,8 @@
     function refreshView() {
       counts();
       anchor = null;
-      table.setRows(ReviewTriage.prepare(sourceRows, lane, grouped));
+      var filtered = sourceRows.filter(builder.matches);
+      table.setRows(ReviewTriage.prepare(filtered, lane, grouped));
     }
     $('fr-lanes').addEventListener('change', function () {
       if (busy || previewBusy || !$('fr-preview').hidden) { this.value = lane; return; }
@@ -281,7 +287,7 @@
 
     // ---------- decisions: explicit preview before EVERY write ----------
     function bulk(action, ids) {
-      if (busy || previewBusy || !$('fr-preview').hidden) return;
+      if (busy || previewBusy || !$('fr-preview').hidden || $('fr-filter-dialog').open) return;
       if (!ids.length) return;
       var selectedDisplay = table.getRows().filter(function (row) { return ids.indexOf(row.id) !== -1; });
       var rowIds = directIds(selectedDisplay);
@@ -406,10 +412,10 @@
     document.addEventListener('keydown', function (e) {
       var t = e.target;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (k === 'Escape' && !$('fr-preview').hidden) { closePreview(); e.preventDefault(); return; }
-      if (!$('fr-preview').hidden) return;
-      if (t.closest && t.closest('input:not([type=checkbox]), select, textarea, [contenteditable]')) return;
       var k = e.key;
+      if (k === 'Escape' && !$('fr-preview').hidden) { closePreview(); e.preventDefault(); return; }
+      if (!$('fr-preview').hidden || $('fr-filter-dialog').open) return;
+      if (t.closest && t.closest('input:not([type=checkbox]), select, textarea, [contenteditable]')) return;
       var handled = true;
       if (k === 'j' || k === 'J') moveCursor(1, e.shiftKey);
       else if (k === 'k' || k === 'K') moveCursor(-1, e.shiftKey);

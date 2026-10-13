@@ -2198,6 +2198,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <div class="fr-panel">
       <div class="fr-triage" aria-label="Review triage">
         <label for="fr-lanes">Triage filter</label><select id="fr-lanes" aria-label="Triage filter"></select>
+        <button type="button" id="fr-filter-open" class="button secondary">Filter Builder <span id="fr-filter-count"></span></button>
         <label><input type="checkbox" id="fr-group"> One row per item ID</label>
         <span class="tiny" id="fr-triage-note">Walmart-sold listings are already Not Queued. <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
       </div>
@@ -2223,6 +2224,20 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         The header box selects every row that matches your filters, not just the ones on screen.
       </div>
       <div id="fr-status" class="fr-status" role="status" aria-live="polite"></div>
+      <dialog id="fr-filter-dialog" class="fr-filter-dialog" aria-labelledby="fr-filter-title">
+        <div class="fr-filter-head"><h3 id="fr-filter-title">Filter Builder</h3>
+          <button type="button" class="button secondary" id="fr-filter-close" aria-label="Close filter builder">Close</button></div>
+        <p class="tiny">Combine rules with ALL (AND) or ANY (OR). Filters apply to saved rows before item-ID grouping; selecting for bulk actions uses only matching rows.</p>
+        <div class="fr-filter-tabs" role="group" aria-label="Filter editing mode">
+          <button type="button" class="button secondary" id="fr-filter-rules">Rule Editor</button>
+          <button type="button" class="button secondary" id="fr-filter-json">JSON Editor</button></div>
+        <div id="fr-filter-tree"></div>
+        <div id="fr-filter-json-area" hidden><label for="fr-filter-source">Filter JSON</label>
+          <textarea id="fr-filter-source" spellcheck="false" aria-describedby="fr-filter-error"></textarea></div>
+        <p id="fr-filter-error" class="fr-status error" role="alert" hidden></p>
+        <div class="fr-filter-footer"><button type="button" class="button secondary" id="fr-filter-clear">Clear filters</button>
+          <button type="button" class="button" id="fr-filter-apply">Apply filters</button></div>
+      </dialog>
       <div id="fr-preview" class="fr-preview" hidden role="dialog" aria-modal="true" aria-labelledby="fr-preview-title" tabindex="-1">
         <h3 id="fr-preview-title">Review decision preview</h3><p id="fr-preview-text"></p>
         <div class="row-actions"><button type="button" class="button" id="fr-confirm">Confirm decision</button>
@@ -2234,7 +2249,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
 """
     params = json.dumps({"state": state, "country_signal": country_signal, "job": job}).replace("</", "<\\/")
     script = THUMB_PREVIEW_SCRIPT + QUEUE_TABLE_SCRIPT.replace("__QUEUE_PARAMS__", params)
-    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "review_triage.js", "fast_review.js"),
+    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "review_triage.js", "review_filter.js", "review_filter_builder.js", "fast_review.js"),
                      subtitle="Approve or dispute prescreened listings, then export the evidence.")
 
 
