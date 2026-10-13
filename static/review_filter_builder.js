@@ -93,12 +93,22 @@
         e.preventDefault(); $('fr-filter-apply').click();
       }
     });
+    function updateApplied() {
+      var count = RF.count(tree);
+      $('fr-filter-count').textContent = count ? '(' + count + ')' : '';
+      $('fr-filter-clear-quick').hidden = !count;
+      config.onApply(tree);
+    }
+    $('fr-filter-clear-quick').addEventListener('click', function () {
+      if (config.blocked() || dialog.open) return;
+      tree = RF.empty();
+      updateApplied();
+    });
     $('fr-filter-apply').addEventListener('click', function () {
       if (mode === 'json' && !fromJson()) return;
       try { tree = RF.validate(draft); }
       catch (e) { report(e.message); return; }
-      $('fr-filter-count').textContent = RF.count(tree) ? '(' + RF.count(tree) + ')' : '';
-      config.onApply(tree);
+      updateApplied();
       close();
     });
     $('fr-filter-tree').addEventListener('input', function (e) {

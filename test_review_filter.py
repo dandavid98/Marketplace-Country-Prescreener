@@ -47,6 +47,60 @@ class ReviewFilterTests(unittest.TestCase):
         self.page.locator('#fr-filter-source').fill(json.dumps(data))
         self.page.locator('#fr-filter-apply').click()
 
+    def test_quick_clear_beside_pagination_preserves_other_filters(self):
+        p = self.page
+        quick = p.locator('#fr-filter-clear-quick')
+        self.assertTrue(quick.is_hidden())
+        p.locator('#fr-lanes').select_option('generic')
+        p.locator('#fr-group').check()
+        self.apply_json({'operator': 'and', 'filters': [
+            {'columnId': 'country_signal', 'operator': 'is', 'value': 'US'}]})
+        self.assertTrue(quick.is_visible())
+        self.assertEqual(p.locator('#fr-filter-count').inner_text(), '(1)')
+        self.assertEqual(quick.evaluate('(el) => el.previousElementSibling.id'), 'fr-pagination')
+        self.assertEqual(p.locator('#queue-table tbody tr[data-row-id]').count(), 1)
+        p.locator('input[data-select-id]').check()
+        quick.click()
+        self.assertTrue(quick.is_hidden())
+        self.assertEqual(p.locator('#fr-filter-count').inner_text(), '')
+        self.assertEqual(p.locator('#fr-lanes').input_value(), 'generic')
+        self.assertTrue(p.locator('#fr-group').is_checked())
+        self.assertEqual(p.locator('#queue-table tbody tr[data-row-id]').count(), 1)
+        self.assertIn('2 rows', p.locator('#fr-lanes option[value="generic"]').inner_text())
+        self.assertTrue(p.locator('#fr-selected').is_hidden())
+        self.open_json()
+        self.assertIn('"filters": []', p.locator('#fr-filter-source').input_value())
+        self.assertFalse(self.errors)
+
+    def test_quick_clear_sits_beside_rows_to_add_on_long_queue(self):
+        p = self.page
+        rows = [dict(ROWS[0], id=i, item_id=str(i), title='Generic soap ' + str(i))
+                for i in range(110)]
+        p.route('**/api/queue?*', lambda route: route.fulfill(json=rows))
+        p.reload()
+        p.locator('#fr-pagination .show-more-count').wait_for()
+        self.apply_json({'operator': 'and', 'filters': [
+            {'columnId': 'listing_brand', 'operator': 'is', 'value': 'Generic'}]})
+        self.assertTrue(p.locator('#fr-pagination .show-more-count').is_visible())
+        self.assertEqual(p.locator('#fr-filter-clear-quick').evaluate(
+            '(el) => el.previousElementSibling.id'), 'fr-pagination')
+        self.assertTrue(p.locator('#fr-filter-clear-quick').is_visible())
+        p.locator('#fr-filter-clear-quick').click()
+        self.assertTrue(p.locator('#fr-filter-clear-quick').is_hidden())
+        self.assertTrue(p.locator('#fr-pagination .show-more-count').is_visible())
+        self.assertFalse(self.errors)
+
+    def test_quick_clear_when_filter_returns_no_rows(self):
+        p = self.page
+        self.apply_json({'operator': 'and', 'filters': [
+            {'columnId': 'title', 'operator': 'is', 'value': 'impossible'}]})
+        self.assertEqual(p.locator('#queue-table tbody tr[data-row-id]').count(), 0)
+        self.assertTrue(p.locator('#fr-filter-clear-quick').is_visible())
+        p.locator('#fr-filter-clear-quick').click()
+        self.assertEqual(p.locator('#queue-table tbody tr[data-row-id]').count(), 3)
+        self.assertTrue(p.locator('#fr-filter-clear-quick').is_hidden())
+        self.assertFalse(self.errors)
+
     def test_nested_rules_json_round_trip_and_grouping(self):
         p = self.page
         p.locator('#fr-filter-open').click()

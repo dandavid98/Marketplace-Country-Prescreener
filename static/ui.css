@@ -377,6 +377,8 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 }
 .fr-count { color: var(--muted-foreground); display: flex; flex: 1 1 auto; min-width: 0; align-items: center; flex-wrap: wrap; gap: 8px; }
 #fr-pagination { display: inline-flex; align-items: center; gap: 8px; }
+#fr-filter-clear-quick { height: 26px; font-size: 12px; }
+#fr-filter-clear-quick[hidden] { display: none; }
 .fr-selected { color: var(--fr-accent-text); font-weight: 600; }
 .fr-actions { display: flex; align-items: center; gap: 2px; }
 .fr-icon {

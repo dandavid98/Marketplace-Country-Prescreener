@@ -2203,7 +2203,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         <span class="tiny" id="fr-triage-note">Walmart-sold listings are already Not Queued. <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
       </div>
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
-        <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span></div>
+        <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span><button type="button" id="fr-filter-clear-quick" class="button secondary" hidden>Clear filters</button></div>
         <div class="fr-actions">
           <button type="button" class="fr-icon fr-approve" data-bulk="approve" title="Approve selected (Shift+A)" aria-label="Approve selected" aria-keyshortcuts="Shift+A" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span>Approve</span></button>
