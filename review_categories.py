@@ -17,6 +17,7 @@ CATEGORIES = (
     "IP Rights Infringement Food and Beverage",
     "IP Rights Infringement Household and Cleaning",
     "IP Rights Infringement Personal Care and Hygi",
+    "IP Rights Infringement Utility Outdoor & Maintenence",
     "IP Rights Infringement Media",
     "Trademark Infringement Apparel",
     "IP Rights Infringement Nutraceuticals",
