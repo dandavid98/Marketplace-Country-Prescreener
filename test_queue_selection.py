@@ -2,6 +2,7 @@
 import os
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import sync_playwright
 
@@ -128,9 +129,12 @@ class QueueSelectionTests(unittest.TestCase):
                 page.route("**/api/review/preview", preview)
                 page.route("**/api/review/bulk", lambda route: self.fail("Cancel must never save"))
                 page.goto(URL)
-                page.locator('.fr-lane').first.wait_for()
-                self.assertIn("2 items / 3 rows", page.locator('[data-lane="all"]').inner_text())
-                page.locator('[data-lane="generic"]').click()
+                page.locator('#fr-lanes option').first.wait_for(state='attached')
+                self.assertEqual(page.locator('#fr-lanes option').count(), 6)
+                self.assertIn("2 items / 3 rows", page.locator('#fr-lanes option[value="all"]').inner_text())
+                page.locator('#fr-lanes').select_option('generic')
+                self.assertEqual(page.locator('#fr-lanes').input_value(), 'generic')
+                self.assertEqual(parse_qs(urlparse(page.url).query)['lane'], ['generic'])
                 self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 2)
                 page.locator('#fr-group').check()
                 self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 1)
@@ -144,7 +148,7 @@ class QueueSelectionTests(unittest.TestCase):
                               page.locator('#fr-preview-text').inner_text())
                 page.locator('#fr-cancel').click()
                 self.assertTrue(page.locator('#fr-preview').is_hidden())
-                page.locator('[data-lane="missing_brand"]').click()
+                page.locator('#fr-lanes').select_option('missing_brand')
                 self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 1)
             finally:
                 browser.close()

@@ -2197,7 +2197,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items come back marked "approved before". <strong>Not set</strong> forgets the decision.</p>
     <div class="fr-panel">
       <div class="fr-triage" aria-label="Review triage">
-        <span class="tiny">Triage:</span><div id="fr-lanes" class="fr-lanes"></div>
+        <label for="fr-lanes">Triage filter</label><select id="fr-lanes" aria-label="Triage filter"></select>
         <label><input type="checkbox" id="fr-group"> One row per item ID</label>
         <span class="tiny" id="fr-triage-note">Walmart-sold listings are already Not Queued. <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
       </div>

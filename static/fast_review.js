@@ -60,9 +60,8 @@
       var summary = ReviewTriage.counts(sourceRows);
       $('fr-lanes').innerHTML = ReviewTriage.lanes.map(function (entry) {
         var s = summary[entry[0]];
-        return '<button type="button" class="fr-lane' + (lane === entry[0] ? ' active' : '') +
-          '" data-lane="' + entry[0] + '" aria-pressed="' + (lane === entry[0]) + '">' +
-          esc(entry[1]) + ' (' + s.items.toLocaleString() + ' items / ' + s.rows.toLocaleString() + ' rows)</button>';
+        return '<option value="' + entry[0] + '"' + (lane === entry[0] ? ' selected' : '') + '>' +
+          esc(entry[1]) + ' (' + s.items.toLocaleString() + ' items / ' + s.rows.toLocaleString() + ' rows)</option>';
       }).join('');
     }
     function refreshView() {
@@ -70,10 +69,9 @@
       anchor = null;
       table.setRows(ReviewTriage.prepare(sourceRows, lane, grouped));
     }
-    $('fr-lanes').addEventListener('click', function (e) {
-      var button = e.target.closest('[data-lane]');
-      if (!button || busy || previewBusy) return;
-      lane = button.dataset.lane;
+    $('fr-lanes').addEventListener('change', function () {
+      if (busy || previewBusy || !$('fr-preview').hidden) { this.value = lane; return; }
+      lane = this.value;
       history.replaceState(null, '', location.pathname + '?' + new URLSearchParams(Object.assign({}, params, lane === 'all' ? {} : { lane: lane })));
       selected.clear();
       expanded.clear();

@@ -340,10 +340,10 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 #queue-table { min-width: 1640px; }
 #queue-table .col-id { width: 124px; }   /* 11-digit item IDs on one line */
 .fr-triage { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-.fr-lanes { display: flex; gap: 6px; flex-wrap: wrap; }
-.fr-lane, .fr-copies { border: 1px solid var(--border); border-radius: var(--radius); color: var(--foreground); background: var(--card); padding: 4px 7px; font: inherit; }
-.fr-lane:hover, .fr-copies:hover { background: var(--muted); }
-.fr-lane.active { background: var(--nav-active-bg); color: var(--nav-active-text); border-color: var(--nav-active-text); }
+.fr-triage select { max-width: min(100%, 360px); padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; }
+.fr-triage select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fr-copies { border: 1px solid var(--border); border-radius: var(--radius); color: var(--foreground); background: var(--card); padding: 4px 7px; font: inherit; }
+.fr-copies:hover { background: var(--muted); }
 .fr-triage label { display: inline-flex; align-items: center; gap: 5px; }
 .fr-copy-detail td { background: var(--muted); padding: 8px 16px; }
 .fr-copy-item { padding: 4px 0; overflow-wrap: anywhere; }
