@@ -130,20 +130,25 @@
       paint();
     }
 
-    // checkbox clicks: we own the checked state, so stop the browser toggling it itself
-    tableEl.addEventListener('mousedown', function (e) {
-      if (e.shiftKey && e.target.closest('.fr-box')) e.preventDefault();   // no text selection on shift-click
+    // Let the browser finish toggling the checkbox (including clicks on its label)
+    // before syncing it with selection. Preventing its click default action used
+    // to undo paint() after the handler ran, leaving the tick one click behind.
+    var checkboxShift = false;
+    // Shift-click must keep its native click/change events; cancelling mousedown
+    // stops the checkbox from changing at all in some browsers.
+    tableEl.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('.fr-box')) checkboxShift = e.shiftKey;
     });
     tableEl.addEventListener('click', function (e) {
-      var box = e.target.closest('.fr-box');
-      if (box) {
-        e.preventDefault();
-        var tr = box.closest('tr');
-        clickRow(Array.prototype.indexOf.call(tableEl.tBodies[0].rows, tr), e.shiftKey);
-        return;
-      }
+      if (e.target.matches('input[data-select-id]')) checkboxShift = checkboxShift || e.shiftKey;
       var act = e.target.closest('[data-row-action]');
       if (act) bulk(act.dataset.rowAction, [Number(act.dataset.id)]);
+    });
+    tableEl.addEventListener('change', function (e) {
+      if (!e.target.matches('input[data-select-id]')) return;
+      var tr = e.target.closest('tr');
+      clickRow(Array.prototype.indexOf.call(tableEl.tBodies[0].rows, tr), checkboxShift || e.shiftKey);
+      checkboxShift = false;
     });
     tableEl.tHead.addEventListener('change', function (e) {
       if (!e.target.classList.contains('fr-all')) return;
@@ -285,7 +290,7 @@
       var handled = true;
       if (k === 'j' || k === 'J') moveCursor(1, e.shiftKey);
       else if (k === 'k' || k === 'K') moveCursor(-1, e.shiftKey);
-      else if (k === ' ' && cursor >= 0 && !(t.closest && t.closest('button, a'))) clickRow(cursor, false);
+      else if (k === ' ' && cursor >= 0 && !(t.closest && t.closest('button, a, input[type=checkbox]'))) clickRow(cursor, false);
       else if (e.shiftKey && (k === 'A' || k === 'a')) bulk('approve', Array.from(selected));
       else if (e.shiftKey && (k === 'D' || k === 'd')) bulk('reject', Array.from(selected));
       else if (e.shiftKey && (k === 'Z' || k === 'z')) bulk('unset', Array.from(selected));
