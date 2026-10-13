@@ -2087,7 +2087,7 @@ def api_job(job_id: str) -> JSONResponse:
 QUEUE_ROW_FIELDS = (
     "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_brand", "listing_url",
     "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
-    "scan_status", "evidence", "review_state", "review_category", "match_kind", "remembered", "job_id",
+    "scan_status", "evidence", "review_state", "review_category", "match_kind", "remembered", "job_id", "created_at",
 )
 
 

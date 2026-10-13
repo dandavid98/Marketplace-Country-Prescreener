@@ -10,6 +10,7 @@
    survive the full-page reload after Approve/Reject on the queue.
    leadColumns (optional): columns placed BEFORE the base ones (e.g. a select box).
    afterTitleColumns (optional): columns placed after Title (e.g. queue listing brand).
+   afterCounterfeitColumns (optional): columns placed after Counterfeit Reviews.
    onRender(shownRows) (optional): called after every render with the rows on screen,
    in on-screen order. Rows with an `id` get <tr data-row-id="...">.
 
@@ -85,9 +86,11 @@
   function create(table, opts) {
     opts = opts || {};
     var titleIndex = BASE_COLUMNS.findIndex(function (column) { return column.key === 'title'; }) + 1;
+    var counterfeitIndex = BASE_COLUMNS.findIndex(function (column) { return column.key === 'counterfeit'; }) + 1;
     var columns = (opts.leadColumns || []).concat(
       BASE_COLUMNS.slice(0, titleIndex), opts.afterTitleColumns || [],
-      BASE_COLUMNS.slice(titleIndex), opts.extraColumns || []);
+      BASE_COLUMNS.slice(titleIndex, counterfeitIndex), opts.afterCounterfeitColumns || [],
+      BASE_COLUMNS.slice(counterfeitIndex), opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
     var moreChoices = opts.showMoreChoices || null;
     var pagination = opts.paginationTarget || table.tFoot;

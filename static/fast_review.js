@@ -121,6 +121,17 @@
         { key: 'listing_brand', label: 'Listing Brand', thClass: 'col-mid', filter: 'text',
           value: function (r) { return r.listing_brand || ''; } }
       ],
+      afterCounterfeitColumns: [
+        { key: 'date_scanned', label: 'Date Scanned', thClass: 'col-mid', filter: 'text',
+          value: function (r) {
+            var stamp = r.created_at || '';
+            if (!stamp) return '';
+            var date = new Date(stamp);
+            return isNaN(date.getTime()) ? stamp.slice(0, 10) :
+              [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'),
+                String(date.getDate()).padStart(2, '0')].join('-');
+          } }
+      ],
       extraColumns: [
         { key: 'review_category', label: 'Category', thClass: 'col-mid', filter: 'select',
           value: function (r) { return r.review_category || ''; },

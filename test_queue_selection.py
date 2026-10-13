@@ -13,6 +13,34 @@ OPERA = Path("/Applications/Opera.app/Contents/MacOS/Opera")
 
 @unittest.skipUnless(OPERA.exists(), "Opera is needed for the browser regression")
 class QueueSelectionTests(unittest.TestCase):
+    def test_date_scanned_uses_each_rows_saved_timestamp(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
+            try:
+                context = browser.new_context(timezone_id='America/Chicago')
+                page = context.new_page()
+                rows = [dict(id=i, item_id='same-item', review_state='pending', scan_status='match',
+                             title=f'Repeat {i}', created_at=stamp) for i, stamp in (
+                                 (1, '2026-10-12T01:30:00+00:00'),
+                                 (2, '2026-10-12T14:30:00+00:00'),
+                                 (3, ''))]
+                page.route('**/api/queue?*', lambda route: route.fulfill(json=rows))
+                page.goto(URL)
+                headers = page.locator('#queue-table thead tr:first-child th')
+                labels = [h.inner_text().strip().split('↕')[0].strip() for h in headers.all()]
+                date_index = labels.index('Date Scanned')
+                self.assertEqual([page.locator(f'tr[data-row-id="{i}"] td').nth(date_index).inner_text()
+                                  for i in (1, 2, 3)], ['2026-10-11', '2026-10-12', ''])
+                page.get_by_role('searchbox', name='Filter by Date Scanned').fill('2026-10-11')
+                self.assertEqual(page.locator('tr[data-row-id]').count(), 1)
+                self.assertEqual(page.locator('tr[data-row-id]').first.get_attribute('data-row-id'), '1')
+                page.get_by_role('searchbox', name='Filter by Date Scanned').fill('')
+                page.get_by_role('button', name='Date Scanned').click()
+                self.assertEqual(page.locator('tr[data-row-id]').first.get_attribute('data-row-id'), '1')
+                context.close()
+            finally:
+                browser.close()
+
     def test_click_label_shift_range_keyboard_and_select_all(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
@@ -33,6 +61,7 @@ class QueueSelectionTests(unittest.TestCase):
                           if heading.locator("button").count() else heading.inner_text().strip()
                           for heading in headings.all()]
                 self.assertEqual(labels[labels.index("Title") + 1:labels.index("Seller")], ["Listing Brand"])
+                self.assertEqual(labels[labels.index("Counterfeit Reviews") + 1], "Date Scanned")
                 self.assertEqual(page.locator("#queue-table tbody tr:first-child td").nth(labels.index("Listing Brand")).inner_text(), "Generic")
                 page.get_by_role("searchbox", name="Filter by Listing Brand").fill("Generic")
                 self.assertIn("1 of 5 rows", page.locator("#fr-rowcount").inner_text())

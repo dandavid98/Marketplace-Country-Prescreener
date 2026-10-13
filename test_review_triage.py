@@ -42,6 +42,9 @@ class ReviewTriageTests(unittest.TestCase):
         self.assertIn("missing_brand", review_triage.lane_flags(rows[2]))
         self.assertIn("verify_seller", review_triage.lane_flags(rows[2]))
         self.assertEqual(review_triage.lane_flags(rows[3]), ["walmart"])
+        payload = app.api_queue(state='pending', country_signal='all', job='scan-a')
+        import json
+        self.assertIn('created_at', json.loads(payload.body)[0])
         self.assertIn("approved_before", review_triage.lane_flags(rows[4]))
         self.assertIn("verify_seller", review_triage.lane_flags(rows[5]))
         self.assertNotIn("walmart", review_triage.lane_flags({"seller_name": "Walmart.com", "scan_status": "match"}))
