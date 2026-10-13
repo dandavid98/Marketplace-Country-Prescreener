@@ -1,11 +1,12 @@
 """Read-only Opera/Playwright regression for review queue checkbox selection."""
+import os
 import unittest
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 
-URL = "http://127.0.0.1:8001/queue?state=pending&country_signal=all&job=latest"
+URL = os.environ.get("PRESCREENER_TEST_URL", "http://127.0.0.1:8001/queue?state=pending&country_signal=all&job=latest")
 OPERA = Path("/Applications/Opera.app/Contents/MacOS/Opera")
 
 
@@ -98,6 +99,53 @@ class QueueSelectionTests(unittest.TestCase):
                 self.assertEqual(rows.count(), 125)
                 self.assertIn("Showing 125 of 125 matching", page.locator("#fr-pagination").inner_text())
                 self.assertTrue(rows.first.locator("input[data-select-id]").is_checked())
+            finally:
+                browser.close()
+
+
+    def test_triage_grouping_and_preview_cancel_do_not_write(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
+            try:
+                page = browser.new_page()
+                rows = [
+                    {"id": 10, "job_id": "scan-a", "item_id": "42", "review_state": "pending",
+                     "scan_status": "match", "title": "Listing A", "listing_brand": "Generic",
+                     "triage_lanes": ["generic"]},
+                    {"id": 11, "job_id": "scan-b", "item_id": "42", "review_state": "pending",
+                     "scan_status": "match", "title": "Listing B", "listing_brand": "Generic",
+                     "triage_lanes": ["generic", "verify_seller"]},
+                    {"id": 12, "job_id": "scan-a", "item_id": "43", "review_state": "pending",
+                     "scan_status": "match", "title": "Listing C", "triage_lanes": ["missing_brand"]},
+                ]
+                page.route("**/api/queue?*", lambda route: route.fulfill(json=rows))
+                seen = []
+                def preview(route):
+                    seen.append(route.request.post_data_json)
+                    route.fulfill(json={"rows": 2, "items": 1, "pending_repeats": 0,
+                                        "remembered_repeats": 0, "without_item_id": 0,
+                                        "walmart_rows": 0, "action": "reject"})
+                page.route("**/api/review/preview", preview)
+                page.route("**/api/review/bulk", lambda route: self.fail("Cancel must never save"))
+                page.goto(URL)
+                page.locator('.fr-lane').first.wait_for()
+                self.assertIn("2 items / 3 rows", page.locator('[data-lane="all"]').inner_text())
+                page.locator('[data-lane="generic"]').click()
+                self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 2)
+                page.locator('#fr-group').check()
+                self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 1)
+                page.locator('.fr-copies').click()
+                self.assertIn('Listing B', page.locator('.fr-copy-detail').inner_text())
+                page.locator('input[data-select-id]').click()
+                page.locator('[data-bulk="reject"]').click()
+                page.locator('#fr-preview').wait_for()
+                self.assertEqual(seen[0]['ids'], [10, 11])
+                self.assertIn('2 selected saved rows representing 1 item IDs',
+                              page.locator('#fr-preview-text').inner_text())
+                page.locator('#fr-cancel').click()
+                self.assertTrue(page.locator('#fr-preview').is_hidden())
+                page.locator('[data-lane="missing_brand"]').click()
+                self.assertEqual(page.locator('#queue-table tbody tr[data-row-id]').count(), 1)
             finally:
                 browser.close()
 

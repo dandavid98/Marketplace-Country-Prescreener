@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import ssl
 import sqlite3
@@ -28,6 +29,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 import decision_memory
+import review_triage
 import scan_history
 import scan_history_page
 from brand_signals import is_generic_brand
@@ -103,7 +105,7 @@ MAX_LISTING_WORKERS = 12
 DEFAULT_STOP_AFTER_FIRST_MATCH = False
 DEFAULT_MODE = "balanced"
 DEFAULT_SEARCH_TYPE = "keyword"
-DB_PATH = Path(__file__).with_name("prescreener.sqlite3")
+DB_PATH = Path(os.environ.get("PRESCREENER_DB_PATH", Path(__file__).with_name("prescreener.sqlite3")))
 
 
 class BotChallengeDetected(RuntimeError):
@@ -2072,7 +2074,7 @@ def api_job(job_id: str) -> JSONResponse:
 QUEUE_ROW_FIELDS = (
     "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_brand", "listing_url",
     "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
-    "scan_status", "evidence", "review_state", "match_kind", "remembered",
+    "scan_status", "evidence", "review_state", "match_kind", "remembered", "job_id",
 )
 
 
@@ -2091,7 +2093,8 @@ def _queue_scope(job: str) -> str | None:
 def api_queue(state: str = Query(default="pending"), country_signal: str = Query(default="China"), job: str = Query(default="latest")) -> JSONResponse:
     """Rows for the queue table. Only the fields the table shows, to keep big views light."""
     rows = get_reviews(state, country_signal, job_id=_queue_scope(job))
-    return JSONResponse([{k: row.get(k) for k in QUEUE_ROW_FIELDS} for row in rows])
+    return JSONResponse([{**{k: row.get(k) for k in QUEUE_ROW_FIELDS},
+                          "triage_lanes": review_triage.lane_flags(row)} for row in rows])
 
 
 QUEUE_TABLE_SCRIPT = """
@@ -2102,12 +2105,28 @@ initThumbPreview();
 BULK_ACTIONS = {"approve": "approved", "reject": "rejected", "unset": "pending"}
 
 
+@app.post("/api/review/preview")
+def api_review_preview(action: str = Body(...), ids: list[int] = Body(...), job: str = Body(default="all")) -> JSONResponse:
+    if action not in BULK_ACTIONS:
+        return JSONResponse({"error": "Unknown review action"}, status_code=400)
+    try:
+        return JSONResponse(review_triage.preview(DB_PATH, ids, action, _queue_scope(job)))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @app.post("/api/review/bulk")
-def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...)) -> JSONResponse:
+def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...), job: str = Body(default="all"),
+                    confirmed: bool = Body(default=False)) -> JSONResponse:
     """Fast Review: approve / dispute (reject) / unset many queue rows in one call."""
     if action not in BULK_ACTIONS:
         return JSONResponse({"error": f"unknown action {action!r}"}, status_code=400)
-    ids = list(dict.fromkeys(ids))[:5000]
+    if not confirmed:
+        return JSONResponse({"error": "Preview and confirm the decision before saving"}, status_code=400)
+    try:
+        review_triage.preview(DB_PATH, ids, action, _queue_scope(job))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     updated, cascaded = update_review_states(ids, BULK_ACTIONS[action])
     return JSONResponse({"updated": updated, "cascaded": cascaded, "review_state": BULK_ACTIONS[action]})
 
@@ -2177,6 +2196,11 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.
       Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items come back marked "approved before". <strong>Not set</strong> forgets the decision.</p>
     <div class="fr-panel">
+      <div class="fr-triage" aria-label="Review triage">
+        <span class="tiny">Triage:</span><div id="fr-lanes" class="fr-lanes"></div>
+        <label><input type="checkbox" id="fr-group"> One row per item ID</label>
+        <span class="tiny" id="fr-triage-note">Walmart-sold listings are already Not Queued. <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
+      </div>
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
         <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span></div>
         <div class="fr-actions">
@@ -2199,13 +2223,18 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         The header box selects every row that matches your filters, not just the ones on screen.
       </div>
       <div id="fr-status" class="fr-status" role="status" aria-live="polite"></div>
+      <div id="fr-preview" class="fr-preview" hidden role="dialog" aria-modal="true" aria-labelledby="fr-preview-title" tabindex="-1">
+        <h3 id="fr-preview-title">Review decision preview</h3><p id="fr-preview-text"></p>
+        <div class="row-actions"><button type="button" class="button" id="fr-confirm">Confirm decision</button>
+          <button type="button" class="button secondary" id="fr-cancel">Cancel</button></div>
+      </div>
       <div class="fr-scroll" tabindex="0" aria-label="Review queue table, scrollable"><table id="queue-table"></table></div>
     </div>
   </div>
 """
     params = json.dumps({"state": state, "country_signal": country_signal, "job": job}).replace("</", "<\\/")
     script = THUMB_PREVIEW_SCRIPT + QUEUE_TABLE_SCRIPT.replace("__QUEUE_PARAMS__", params)
-    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "fast_review.js"),
+    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "review_triage.js", "fast_review.js"),
                      subtitle="Approve or dispute prescreened listings, then export the evidence.")
 
 

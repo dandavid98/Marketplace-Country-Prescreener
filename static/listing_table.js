@@ -269,6 +269,7 @@
 
     return {
       setRows: function (rows) { state.rows = rows || []; render(); },
+      refresh: render,
       getRows: function () { return state.rows; },
       getMatchingRows: visibleRows,      // every row passing the filters, in sorted order
       render: render

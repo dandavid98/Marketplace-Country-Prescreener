@@ -39,6 +39,53 @@
     var cursor = -1;                // keyboard row cursor (index in `shown`)
     var busy = false;
     var lastUndo = null;
+    var sourceRows = [];
+    var lane = new URLSearchParams(location.search).get('lane') || 'all';
+    if (!ReviewTriage.lanes.some(function (entry) { return entry[0] === lane; })) lane = 'all';
+    var grouped = false;
+    var expanded = new Set();
+    var pendingDecision = null;
+    var previewBusy = false;
+
+    function directIds(rows) {
+      return Array.from(new Set(rows.reduce(function (ids, row) {
+        (row.copies || [row]).forEach(function (copy) { ids.push(copy.id); });
+        return ids;
+      }, [])));
+    }
+    function selectedRows() {
+      return table.getRows().filter(function (row) { return selected.has(row.id); });
+    }
+    function counts() {
+      var summary = ReviewTriage.counts(sourceRows);
+      $('fr-lanes').innerHTML = ReviewTriage.lanes.map(function (entry) {
+        var s = summary[entry[0]];
+        return '<button type="button" class="fr-lane' + (lane === entry[0] ? ' active' : '') +
+          '" data-lane="' + entry[0] + '" aria-pressed="' + (lane === entry[0]) + '">' +
+          esc(entry[1]) + ' (' + s.items.toLocaleString() + ' items / ' + s.rows.toLocaleString() + ' rows)</button>';
+      }).join('');
+    }
+    function refreshView() {
+      counts();
+      anchor = null;
+      table.setRows(ReviewTriage.prepare(sourceRows, lane, grouped));
+    }
+    $('fr-lanes').addEventListener('click', function (e) {
+      var button = e.target.closest('[data-lane]');
+      if (!button || busy || previewBusy) return;
+      lane = button.dataset.lane;
+      history.replaceState(null, '', location.pathname + '?' + new URLSearchParams(Object.assign({}, params, lane === 'all' ? {} : { lane: lane })));
+      selected.clear();
+      expanded.clear();
+      refreshView();
+    });
+    $('fr-group').addEventListener('change', function () {
+      if (busy || previewBusy) { this.checked = grouped; return; }
+      grouped = this.checked;
+      selected.clear();
+      expanded.clear();
+      refreshView();
+    });
 
     var selectColumn = {
       key: 'select', label: 'Select', thClass: 'col-select', tdClass: 'cell-select',
@@ -56,7 +103,16 @@
       paginationTarget: $('fr-pagination'),
       storageKey: 'prescreener_queue',
       emptyText: 'No items in this queue view.',
-      leadColumns: [selectColumn],
+      leadColumns: [selectColumn, {
+        key: 'copies', label: 'Copies', thClass: 'col-short', cell: function (r) {
+          if (!grouped || r.copies.length < 2) return '';
+          var open = expanded.has(r.id);
+          return '<button type="button" class="fr-copies" data-copies="' + esc(r.id) +
+            '" aria-expanded="' + open + '" aria-label="' + (open ? 'Hide' : 'Show') + ' ' +
+            r.copies.length + ' copies of item ' + esc(r.item_id) + '">' +
+            r.copies.length + ' copies ' + (open ? '▴' : '▾') + '</button>';
+        }
+      }],
       afterTitleColumns: [
         { key: 'listing_brand', label: 'Listing Brand', thClass: 'col-mid', filter: 'text',
           value: function (r) { return r.listing_brand || ''; } }
@@ -81,14 +137,41 @@
         matchingCount = total;
         if (cursor >= shown.length) cursor = shown.length - 1;
         paint();
+        renderCopies();
       }
     });
 
+    function renderCopies() {
+      tableEl.tBodies[0].querySelectorAll('.fr-copy-detail').forEach(function (el) { el.remove(); });
+      if (!grouped) return;
+      shown.forEach(function (row) {
+        if (!expanded.has(row.id) || row.copies.length < 2) return;
+        var parent = tableEl.tBodies[0].querySelector('tr[data-row-id="' + row.id + '"]');
+        if (!parent) return;
+        var detail = document.createElement('tr');
+        detail.className = 'fr-copy-detail';
+        var cell = document.createElement('td');
+        cell.colSpan = tableEl.tHead.rows[0].cells.length;
+        row.copies.forEach(function (copy) {
+          var item = document.createElement('div');
+          item.className = 'fr-copy-item';
+          var a = document.createElement('a');
+          a.href = copy.listing_url || '#';
+          a.target = '_blank'; a.rel = 'noopener noreferrer';
+          a.textContent = copy.title || 'Listing ' + copy.id;
+          var info = document.createElement('span');
+          info.textContent = ' · Seller: ' + (copy.seller_name || copy.seller_id || 'Unknown') +
+            ' · Scan: ' + (copy.job_id || 'Unknown') + ' · ' + (copy.review_state || 'Unknown');
+          item.appendChild(a); item.appendChild(info); cell.appendChild(item);
+        });
+        detail.appendChild(cell); parent.after(detail);
+      });
+    }
+
     // ---------- selection painting (cheap: no table re-render) ----------
     function paint() {
-      var trs = tableEl.tBodies[0].rows;
+      var trs = tableEl.tBodies[0].querySelectorAll('tr[data-row-id]');
       for (var i = 0; i < trs.length; i++) {
-        if (!trs[i].dataset.rowId) continue;
         var on = selected.has(Number(trs[i].dataset.rowId));
         trs[i].classList.toggle('fr-selected-row', on);
         trs[i].classList.toggle('fr-cursor', i === cursor);
@@ -149,11 +232,17 @@
       if (e.target.matches('input[data-select-id]')) checkboxShift = checkboxShift || e.shiftKey;
       var act = e.target.closest('[data-row-action]');
       if (act) bulk(act.dataset.rowAction, [Number(act.dataset.id)]);
+      var copies = e.target.closest('[data-copies]');
+      if (copies) {
+        var id = Number(copies.dataset.copies);
+        if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
+        table.refresh();
+      }
     });
     tableEl.addEventListener('change', function (e) {
       if (!e.target.matches('input[data-select-id]')) return;
       var tr = e.target.closest('tr');
-      clickRow(Array.prototype.indexOf.call(tableEl.tBodies[0].rows, tr), checkboxShift || e.shiftKey);
+      clickRow(Array.prototype.indexOf.call(tableEl.tBodies[0].querySelectorAll('tr[data-row-id]'), tr), checkboxShift || e.shiftKey);
       checkboxShift = false;
     });
     tableEl.tHead.addEventListener('change', function (e) {
@@ -168,10 +257,12 @@
       if (busy || !selected.size) return;
       var button = this;
       button.disabled = true;
+      var ids = directIds(selectedRows());
+      if (!ids.length) return;
       var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value });
       fetch('/export.xlsx?' + query, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Array.from(selected))
+        body: JSON.stringify(ids)
       }).then(function (response) {
         if (!response.ok) throw new Error('HTTP ' + response.status);
         return response.blob();
@@ -190,50 +281,76 @@
       }).then(function () { paint(); });
     });
 
-    // ---------- bulk actions ----------
+    // ---------- decisions: explicit preview before EVERY write ----------
     function bulk(action, ids) {
-      if (busy || !ids.length) return;
-      var byId = {};
-      table.getRows().forEach(function (r) { byId[r.id] = r; });
-      var before = ids.map(function (id) { return { id: id, state: byId[id] && byId[id].review_state }; });
+      if (busy || previewBusy || !$('fr-preview').hidden) return;
+      if (!ids.length) return;
+      var selectedDisplay = table.getRows().filter(function (row) { return ids.indexOf(row.id) !== -1; });
+      var rowIds = directIds(selectedDisplay);
+      if (!rowIds.length || rowIds.length > 5000) {
+        say('Choose at most 5,000 saved rows per decision. Narrow the lane or selection first.', false, true);
+        return;
+      }
+      previewBusy = true;
+      var body = JSON.stringify({ action: action, ids: rowIds, job: params.job });
+      fetch('/api/review/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body })
+        .then(function (r) { if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || 'HTTP ' + r.status); }); return r.json(); })
+        .then(function (info) {
+          pendingDecision = { action: action, ids: rowIds };
+          $('fr-preview-text').textContent = LABELS[action] + ': ' + info.rows.toLocaleString() +
+            ' selected saved rows representing ' + info.items.toLocaleString() + ' item IDs. ' +
+            info.pending_repeats.toLocaleString() + ' other pending repeats may change through decision memory. ' +
+            info.remembered_repeats.toLocaleString() + ' existing auto-disputed / approved-before copies may have their notes or state updated. ' +
+            (info.without_item_id ? info.without_item_id + ' rows have no item ID and cannot be remembered. ' : '') +
+            (info.walmart_rows ? info.walmart_rows + ' Walmart-sold rows are already Not Queued; disputing them remembers the item ID. ' : '') +
+            'Preview is a snapshot; nothing changes until you confirm.';
+          $('fr-preview').hidden = false;
+          $('fr-confirm').focus();
+        }).catch(function (err) { say('Cannot preview decision: ' + err.message, false, true); })
+        .then(function () { previewBusy = false; });
+    }
+    function closePreview() {
+      $('fr-preview').hidden = true;
+      pendingDecision = null;
+      $('fr-clear').focus();
+    }
+    $('fr-preview').addEventListener('keydown', function (e) {
+      if (e.key !== 'Tab') return;
+      var focus = [$('fr-confirm'), $('fr-cancel')];
+      if (e.shiftKey && document.activeElement === focus[0]) { focus[1].focus(); e.preventDefault(); }
+      else if (!e.shiftKey && document.activeElement === focus[1]) { focus[0].focus(); e.preventDefault(); }
+    });
+    $('fr-cancel').addEventListener('click', closePreview);
+    $('fr-confirm').addEventListener('click', function () {
+      if (!pendingDecision || busy) return;
+      var decision = pendingDecision;
+      closePreview();
+      saveDecision(decision.action, decision.ids);
+    });
+
+    function saveDecision(action, ids) {
       busy = true;
       paint();
       say('Saving ' + ids.length.toLocaleString() + ' row' + (ids.length === 1 ? '' : 's') + '...');
       post(action, ids).then(function (res) {
-        ids.forEach(function (id) { selected.delete(id); });
-        lastUndo = before;
+        lastUndo = ids.map(function (id) {
+          var row = sourceRows.find(function (r) { return r.id === id; });
+          return { id: id, state: row && row.review_state };
+        });
+        selected.clear();
         var msg = LABELS[action] + ' ' + res.updated.toLocaleString() + ' row' + (res.updated === 1 ? '' : 's');
-        if (!res.cascaded) {
-          applyStates(ids, STATE_FOR[action]);
-          say(msg + '.', true);
-          return;
-        }
-        // memory touched repeats of the same item IDs elsewhere in the queue: reload to show them
-        say(msg + ', plus ' + res.cascaded.toLocaleString() + ' repeat' + (res.cascaded === 1 ? '' : 's') +
-            ' of the same item' + (ids.length === 1 ? '' : 's') + ' (remembered).', true);
+        say(msg + (res.cascaded ? ', plus ' + res.cascaded.toLocaleString() + ' remembered repeats.' : '.'), true);
         return reload();
       }).catch(function (err) {
-        say('Could not save (' + err.message + '). Nothing was changed.', false, true);
+        say('Could not save (' + err.message + '). Refresh to check current state.', false, true);
       }).then(function () { busy = false; paint(); });
     }
 
     function post(action, ids) {
       return fetch('/api/review/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: action, ids: ids })
+        body: JSON.stringify({ action: action, ids: ids, job: params.job, confirmed: true })
       }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
-    }
-
-    // update rows in place; rows that no longer belong in this state view drop out
-    function applyStates(ids, state) {
-      var set = new Set(ids);
-      var keep = table.getRows().filter(function (r) {
-        if (!set.has(r.id)) return true;
-        r.review_state = state;
-        return params.state === 'all' || params.state === state;
-      });
-      anchor = null;
-      table.setRows(keep);
     }
 
     function undo() {
@@ -284,13 +401,15 @@
       }
       cursor = next;
       paint();
-      var tr = tableEl.tBodies[0].rows[cursor];
+      var tr = tableEl.tBodies[0].querySelectorAll('tr[data-row-id]')[cursor];
       if (tr) tr.scrollIntoView({ block: 'nearest' });
     }
 
     document.addEventListener('keydown', function (e) {
       var t = e.target;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (k === 'Escape' && !$('fr-preview').hidden) { closePreview(); e.preventDefault(); return; }
+      if (!$('fr-preview').hidden) return;
       if (t.closest && t.closest('input:not([type=checkbox]), select, textarea, [contenteditable]')) return;
       var k = e.key;
       var handled = true;
@@ -313,12 +432,13 @@
           var ids = new Set(rows.map(function (r) { return r.id; }));
           selected.forEach(function (id) { if (!ids.has(id)) selected.delete(id); });
           anchor = null;
-          table.setRows(rows);
+          sourceRows = rows;
+          refreshView();
         });
     }
-    tableEl.tBodies[0].innerHTML = '<tr><td colspan="14" class="muted">Loading queue...</td></tr>';
+    tableEl.tBodies[0].innerHTML = '<tr><td colspan="15" class="muted">Loading queue...</td></tr>';
     reload().catch(function (err) {
-      tableEl.tBodies[0].innerHTML = '<tr><td colspan="14" class="muted">Couldn\'t load the queue (' +
+      tableEl.tBodies[0].innerHTML = '<tr><td colspan="15" class="muted">Couldn\'t load the queue (' +
         esc(err.message) + '). Refresh to try again.</td></tr>';
     });
   }
