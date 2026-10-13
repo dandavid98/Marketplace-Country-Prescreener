@@ -330,6 +330,15 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .fr-panel table { margin-top: 0; }
 .fr-scroll { flex: 0 1 auto; min-height: 0; overflow: auto; scroll-padding-top: var(--thead-h, 90px); }
 .fr-scroll:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* Selection stays usable while scrolling sideways to filters such as Listing Brand. */
+.fr-scroll #queue-table thead th:first-child,
+.fr-scroll #queue-table tbody tr:not(.fr-copy-detail) > td:first-child {
+  position: sticky; left: 0; background: var(--card); box-shadow: inset -1px 0 0 var(--border);
+}
+.fr-scroll #queue-table thead th:first-child { z-index: 3; }
+.fr-scroll #queue-table tbody tr.fr-selected-row > td:first-child {
+  background: color-mix(in oklab, var(--fr-accent) 9%, var(--card));
+}
 /* keep the per-row Approve / Dispute buttons in view while scrolling sideways */
 .fr-scroll .listing-table th:last-child, .fr-scroll .listing-table td:last-child {
   position: sticky; right: 0; background: var(--card); box-shadow: inset 1px 0 0 var(--border);

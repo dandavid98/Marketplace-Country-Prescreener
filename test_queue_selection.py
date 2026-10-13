@@ -64,6 +64,44 @@ class QueueSelectionTests(unittest.TestCase):
                 browser.close()
 
 
+    def test_selection_stays_visible_while_scrolling_to_listing_brand_filter(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1200, "height": 850})
+                page.route("**/api/queue?*", lambda route: route.fulfill(json=[
+                    {"id": i, "item_id": str(i), "review_state": "pending",
+                     "scan_status": "match", "title": f"Listing {i}",
+                     "listing_brand": "Generic" if i < 3 else "Febreze"}
+                    for i in range(1, 5)
+                ]))
+                page.goto(URL)
+                boxes = page.locator("input[data-select-id]")
+                boxes.first.wait_for()
+                scroll = page.locator(".fr-scroll")
+                scroll.evaluate("el => el.scrollLeft = 500")
+                self.assertGreater(scroll.evaluate("el => el.scrollLeft"), 100)
+                page.get_by_role("searchbox", name="Filter by Listing Brand").fill("Generic")
+                self.assertEqual(boxes.count(), 2)
+                bounds = boxes.first.bounding_box()
+                viewport = scroll.bounding_box()
+                self.assertGreaterEqual(bounds["x"], viewport["x"])
+                self.assertLess(bounds["x"] + bounds["width"], viewport["x"] + viewport["width"])
+                self.assertGreaterEqual(page.locator(".fr-all").bounding_box()["x"], viewport["x"])
+                page.get_by_role("button", name="Listing Brand").click()
+                self.assertEqual(boxes.count(), 2)
+                self.assertGreaterEqual(boxes.first.bounding_box()["x"], viewport["x"])
+                boxes.first.click()
+                self.assertTrue(boxes.first.is_checked())
+                self.assertIn("1 selected", page.locator("#fr-selected").inner_text())
+                page.locator(".fr-all").click()
+                self.assertEqual([box.is_checked() for box in boxes.all()], [False, False])
+                page.get_by_role("searchbox", name="Filter by Listing Brand").fill("")
+                self.assertEqual(boxes.count(), 4)
+                self.assertGreaterEqual(boxes.last.bounding_box()["x"], viewport["x"])
+            finally:
+                browser.close()
+
     def test_show_more_choices_keep_selection_and_respect_filters(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=str(OPERA), headless=True)
