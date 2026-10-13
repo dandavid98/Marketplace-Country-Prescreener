@@ -74,7 +74,11 @@ class QueueSelectionTests(unittest.TestCase):
                 ]))
                 page.goto(URL)
                 rows = page.locator("#queue-table tbody tr[data-row-id]")
-                page.get_by_text("Showing 100 of 260").wait_for()
+                page.locator("#fr-pagination").get_by_text("Showing 100 of 260").wait_for()
+                self.assertEqual(page.locator("#queue-table tfoot .show-more").count(), 0)
+                self.assertTrue(page.locator("#fr-pagination").evaluate("el => el.closest('.fr-toolbar') !== null"))
+                self.assertLess(page.locator("#fr-pagination").bounding_box()["x"],
+                                page.locator(".fr-actions").bounding_box()["x"])
                 self.assertEqual(rows.count(), 100)
                 self.assertEqual(page.locator(".show-more-count option").all_text_contents(),
                                  ["100", "500", "2,000", "5,000", "10,000"])
@@ -85,14 +89,14 @@ class QueueSelectionTests(unittest.TestCase):
                 page.locator(".show-more-count").select_option("500")
                 page.locator(".show-more").click()
                 self.assertEqual(rows.count(), 260)  # no phantom rows when fewer than 500 remain
-                self.assertIn("Showing 260 of 260", page.locator("#queue-table tfoot").inner_text())
+                self.assertIn("Showing 260 of 260", page.locator("#fr-pagination").inner_text())
                 self.assertEqual(page.locator(".show-more").count(), 0)
                 page.get_by_role("searchbox", name="Filter by Listing Brand").fill("Generic")
                 self.assertEqual(rows.count(), 100)  # new filter resets the display limit
                 page.locator(".show-more-count").select_option("2000")
                 page.locator(".show-more").click()
                 self.assertEqual(rows.count(), 125)
-                self.assertIn("Showing 125 of 125 matching", page.locator("#queue-table tfoot").inner_text())
+                self.assertIn("Showing 125 of 125 matching", page.locator("#fr-pagination").inner_text())
                 self.assertTrue(rows.first.locator("input[data-select-id]").is_checked())
             finally:
                 browser.close()

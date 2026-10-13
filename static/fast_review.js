@@ -53,6 +53,7 @@
     var table = ListingTable.create(tableEl, {
       pageSize: 100,
       showMoreChoices: [100, 500, 2000, 5000, 10000],
+      paginationTarget: $('fr-pagination'),
       storageKey: 'prescreener_queue',
       emptyText: 'No items in this queue view.',
       leadColumns: [selectColumn],

@@ -90,6 +90,7 @@
       BASE_COLUMNS.slice(titleIndex), opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
     var moreChoices = opts.showMoreChoices || null;
+    var pagination = opts.paginationTarget || table.tFoot;
     var state = { rows: [], sortKey: null, sortDir: 'none', filters: {}, limit: pageSize, optionSigs: {} };
     var byKey = {};
     columns.forEach(function (c) { byKey[c.key] = c; });
@@ -162,9 +163,9 @@
     }
     table.tHead.addEventListener('input', onFilter);
     table.tHead.addEventListener('change', onFilter);
-    tfoot.addEventListener('click', function (e) {
+    pagination.addEventListener('click', function (e) {
       if (!e.target.closest('.show-more')) return;
-      var choice = tfoot.querySelector('.show-more-count');
+      var choice = pagination.querySelector('.show-more-count');
       state.limit += choice ? Number(choice.value) : pageSize;
       render();
     });
@@ -230,6 +231,8 @@
         }).join('') + '</tr>';
       }).join('') || '<tr><td colspan="' + columns.length + '" class="muted">' + esc(empty) + '</td></tr>';
 
+      var previousChoice = pagination.querySelector('.show-more-count');
+      var selectedCount = previousChoice ? previousChoice.value : String(moreChoices ? moreChoices[0] : pageSize);
       var foot = '';
       if (rows.length > shown.length) {
         var next = rows.length - shown.length;
@@ -237,7 +240,7 @@
           ? ' <span class="show-more-controls"><button type="button" class="button secondary show-more">Show more</button>' +
             '<label>Rows to add <select class="show-more-count" aria-label="Rows to add">' +
             moreChoices.map(function (count) {
-              return '<option value="' + count + '">' + count.toLocaleString() + '</option>';
+              return '<option value="' + count + '"' + (String(count) === selectedCount ? ' selected' : '') + '>' + count.toLocaleString() + '</option>';
             }).join('') + '</select></label></span>'
           : ' <button type="button" class="button secondary show-more">Show ' + Math.min(pageSize, next) + ' more</button>';
         foot = 'Showing ' + shown.length + ' of ' + rows.length + (filtered ? ' matching' : '') + controls;
@@ -246,7 +249,12 @@
       } else if (filtered && rows.length) {
         foot = rows.length + ' of ' + state.rows.length + ' rows match';
       }
-      tfoot.innerHTML = foot ? '<tr><td colspan="' + columns.length + '" class="tiny">' + foot + '</td></tr>' : '';
+      if (opts.paginationTarget) {
+        pagination.innerHTML = foot;
+        tfoot.innerHTML = '';
+      } else {
+        tfoot.innerHTML = foot ? '<tr><td colspan="' + columns.length + '" class="tiny">' + foot + '</td></tr>' : '';
+      }
       if (opts.onRender) opts.onRender(shown, rows.length);
     }
 

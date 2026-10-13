@@ -2178,7 +2178,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items come back marked "approved before". <strong>Not set</strong> forgets the decision.</p>
     <div class="fr-panel">
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
-        <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span></div>
+        <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span></div>
         <div class="fr-actions">
           <button type="button" class="fr-icon fr-approve" data-bulk="approve" title="Approve selected (Shift+A)" aria-label="Approve selected" aria-keyshortcuts="Shift+A" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span>Approve</span></button>
