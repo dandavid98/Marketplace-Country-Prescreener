@@ -21,7 +21,7 @@ class ExportTests(unittest.TestCase):
         with sqlite3.connect(db) as conn:
             conn.execute("create table scan_history (job_id text primary key, created_at text, finished_at text, status text, criteria_json text)")
             conn.execute("create table reviews (id integer primary key, job_id text, scan_status text, "
-                         "review_state text, country_signal text, keyword text, title text, listing_url text, negatives text not null default '', created_at text not null default '')")
+                         "review_state text, country_signal text, keyword text, title text, listing_url text, negatives text not null default '', review_category text not null default '', created_at text not null default '')")
             conn.executemany("insert into reviews (id,job_id,scan_status,review_state,country_signal,keyword,title,listing_url,negatives) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
                 (1, "scan-a", "match", "pending", "China", "pending", "item-1", "url-1", "tool, refill"),
                 (2, "scan-a", "match", "approved", "China", "approved", "item-2", "url-2", "tool, refill"),
@@ -39,6 +39,7 @@ class ExportTests(unittest.TestCase):
         finally:
             workbook.close()
         self.assertIn("Review Status", rows[0])
+        self.assertIn("Review Category", rows[0])
         self.assertEqual(rows[0][:2], ("Keyword", "Negatives"))
         return rows[1:]
 
@@ -61,6 +62,21 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self.export_keywords("scan-a", "approved", {1, 2, 5})], ["approved"])
         self.assertEqual([row[0] for row in self.export_keywords("scan-a", "match", {3, 4, 5})], ["disputed"])
         self.assertEqual(self.export_keywords("scan-a", "all", set()), [])
+
+    def test_category_is_exported_only_for_approved_rows(self):
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.execute("update reviews set review_category = 'Trademark Infringement Media' where id in (1, 2)")
+        path = app.export_reviews_xlsx(job_id='scan-a')
+        self.addCleanup(path.unlink, missing_ok=True)
+        workbook = load_workbook(path, read_only=True)
+        try:
+            rows = list(workbook.active.values)
+        finally:
+            workbook.close()
+        category_index = rows[0].index('Review Category')
+        self.assertEqual(next(row[category_index] for row in rows[1:] if row[0] == 'approved'),
+                         'Trademark Infringement Media')
+        self.assertIsNone(next(row[category_index] for row in rows[1:] if row[0] == 'pending'))
 
     def test_saved_scan_negatives_survive_export(self):
         db = Path(self.folder.name) / "fresh.sqlite3"

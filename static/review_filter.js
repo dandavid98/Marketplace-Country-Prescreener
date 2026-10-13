@@ -8,7 +8,8 @@
     ['seller_id', 'Seller ID'], ['country_signal', 'Country'],
     ['scan_status', 'Scan Status'], ['review_state', 'Review Status'],
     ['match_kind', 'Matched As'], ['remembered', 'Remembered'],
-    ['evidence', 'Evidence'], ['job_id', 'Scan ID'], ['price_value', 'Price']
+    ['evidence', 'Evidence'], ['job_id', 'Scan ID'], ['price_value', 'Price'],
+    ['review_category', 'Category']
   ];
   var OPS = [
     ['includes', 'Includes'], ['doesNotInclude', 'Does not include'],

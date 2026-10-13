@@ -345,8 +345,8 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 }
 .fr-scroll .listing-table thead th:last-child { z-index: 2; }
 .fr-scroll .listing-table tbody tr.fr-selected-row td:last-child { background: color-mix(in oklab, var(--fr-accent) 9%, var(--card)); }
-/* queue has 14 columns; reserve space so Title and Listing Brand stay readable */
-#queue-table { min-width: 1640px; }
+/* queue has 15 columns; reserve space so Title and Listing Brand stay readable */
+#queue-table { min-width: 1840px; }
 #queue-table .col-id { width: 124px; }   /* 11-digit item IDs on one line */
 .fr-triage { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--border); }
 .fr-triage select { max-width: min(100%, 360px); padding: 5px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); font: inherit; }
@@ -390,6 +390,11 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 #fr-filter-clear-quick[hidden] { display: none; }
 .fr-selected { color: var(--fr-accent-text); font-weight: 600; }
 .fr-actions { display: flex; align-items: center; gap: 2px; }
+.fr-actions label { font-size: 12px; }
+.fr-actions { flex-wrap: wrap; justify-content: flex-end; }
+#fr-category { max-width: 210px; min-width: 0; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); }
+#fr-category-assign { height: 28px; padding: 0 8px; font-size: 12px; }
+#fr-category-assign:disabled { opacity: .45; cursor: not-allowed; }
 .fr-icon {
   height: 28px; padding: 0 8px; gap: 4px; font-size: 12px; background: transparent; color: var(--muted-foreground);
   border: 1px solid transparent; border-radius: calc(var(--radius) * .8);

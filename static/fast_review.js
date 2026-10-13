@@ -122,6 +122,9 @@
           value: function (r) { return r.listing_brand || ''; } }
       ],
       extraColumns: [
+        { key: 'review_category', label: 'Category', thClass: 'col-mid', filter: 'select',
+          value: function (r) { return r.review_state === 'approved' ? (r.review_category || '') : ''; },
+          cell: function (r) { return esc(r.review_state === 'approved' ? (r.review_category || '') : ''); } },
         { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select',
           value: reviewLabel,
           cell: function (r) {
@@ -197,6 +200,11 @@
       $('fr-selected').textContent = '(' + n.toLocaleString() + ' selected' +
         (n > onScreen ? ', ' + (n - onScreen).toLocaleString() + ' not on screen' : '') + ')';
       document.querySelectorAll('[data-bulk], #fr-clear').forEach(function (b) { b.disabled = n === 0 || busy; });
+      var eligible = n > 0 && selectedRows().length === n && selectedRows().every(function (row) {
+        return (row.copies || [row]).every(function (copy) { return copy.review_state === 'approved'; });
+      });
+      $('fr-category').disabled = !eligible || busy || previewBusy || !$('fr-preview').hidden;
+      $('fr-category-assign').disabled = !eligible || busy || previewBusy || !$('fr-preview').hidden || !$('fr-category').value;
       $('export-selected').disabled = n === 0 || busy;
       $('export-selected').textContent = 'Export selected (' + n.toLocaleString() + ')';
     }
@@ -255,6 +263,34 @@
       else table.getMatchingRows().forEach(function (r) { selected.add(r.id); });
       anchor = null;
       paint();
+    });
+
+    $('fr-category').addEventListener('change', paint);
+    $('fr-category-assign').addEventListener('click', function () {
+      if (busy || previewBusy || !$('fr-preview').hidden || $('fr-filter-dialog').open || this.disabled) return;
+      var category = $('fr-category').value;
+      var ids = directIds(selectedRows());
+      if (!category || !ids.length || ids.length > 5000) {
+        say('Choose at most 5,000 approved saved rows and a category.', false, true);
+        return;
+      }
+      if (!window.confirm((category === '__clear__' ? 'Remove category from ' : 'Assign ' + category + ' to ') +
+          ids.length.toLocaleString() + ' selected approved rows?')) return;
+      busy = true;
+      paint();
+      fetch('/api/review/category', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids, category: category === '__clear__' ? '' : category, job: params.job })
+      }).then(function (res) {
+        if (!res.ok) return res.json().then(function (body) { throw new Error(body.error || 'HTTP ' + res.status); });
+        return res.json();
+      }).then(function (result) {
+        selected.clear();
+        $('fr-category').value = '';
+        say('Categorized ' + result.updated.toLocaleString() + ' approved rows.', false);
+        return reload();
+      }).catch(function (err) { say('Could not assign category: ' + err.message, false, true); })
+        .then(function () { busy = false; paint(); });
     });
 
     $('export-selected').addEventListener('click', function () {

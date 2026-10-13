@@ -29,6 +29,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 import decision_memory
+import review_categories
 import review_triage
 import scan_history
 import scan_history_page
@@ -662,6 +663,7 @@ def init_db() -> None:
             """
         )
         decision_memory.init_memory(conn, extract_item_id)
+        review_categories.init_categories(conn)
         conn.commit()
     scan_history.init_history(DB_PATH)
 
@@ -766,6 +768,12 @@ def update_review_states(record_ids: list[int], review_state: str) -> tuple[int,
                                (review_state, *chunk))
             changed += cur.rowcount
         cascaded = decision_memory.record_decisions(conn, record_ids, review_state, utc_now())
+        if review_state != "approved":
+            # A changed decision invalidates the selected rows' approved-only labels.
+            for start in range(0, len(record_ids), 500):
+                chunk = record_ids[start:start + 500]
+                conn.execute(f"update reviews set review_category = '' where id in ({','.join('?' * len(chunk))})",
+                             chunk)
         conn.commit()
     return changed, cascaded
 
@@ -791,7 +799,7 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
     wb = Workbook()
     ws = wb.active
     ws.title = "Queue"
-    headers = ["Keyword", "Negatives", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Remembered"]
+    headers = ["Keyword", "Negatives", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Review Category", "Remembered"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
     ws.append(headers)
@@ -809,6 +817,7 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
             row.get("country_signal", ""),
             (row.get("match_kind") or "exact").capitalize(),
             STATE_TAB_LABELS.get(row.get("review_state"), row.get("review_state", "")),
+            row.get("review_category", "") if row.get("review_state") == "approved" else "",
             REMEMBERED_LABELS.get(row.get("remembered") or "", ""),
         ]
         if any_counterfeit_checked:
@@ -2074,7 +2083,7 @@ def api_job(job_id: str) -> JSONResponse:
 QUEUE_ROW_FIELDS = (
     "id", "item_id", "image_url", "price_text", "price_value", "keyword", "title", "listing_brand", "listing_url",
     "seller_id", "seller_name", "seller_page_url", "country_signal", "counterfeit_review_count",
-    "scan_status", "evidence", "review_state", "match_kind", "remembered", "job_id",
+    "scan_status", "evidence", "review_state", "review_category", "match_kind", "remembered", "job_id",
 )
 
 
@@ -2131,6 +2140,16 @@ def api_review_bulk(action: str = Body(...), ids: list[int] = Body(...), job: st
     return JSONResponse({"updated": updated, "cascaded": cascaded, "review_state": BULK_ACTIONS[action]})
 
 
+@app.post("/api/review/category")
+def api_review_category(ids: list[int] = Body(...), category: str = Body(...),
+                        job: str = Body(default="all")) -> JSONResponse:
+    try:
+        updated = review_categories.assign(DB_PATH, ids, category, _queue_scope(job))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse({"updated": updated, "category": category})
+
+
 def export_controls(job: str, state: str = "all") -> str:
     options = "".join(
         f'<option value="{key}"{" selected" if key == state else ""}>{label}</option>'
@@ -2176,6 +2195,10 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         _filter_link(f"/queue?state={state}&country_signal={c}&job={job}", f"{c if c.isupper() else c.title()} ({country_counts[c]})", c == country_signal)
         for c in ["China", "US", "Unknown", "all"]
     )
+    category_options = "".join(
+        f'<option value="{html_escape(category, quote=True)}">{html_escape(category)}</option>'
+        for category in review_categories.CATEGORIES
+    )
     body = f"""
   <div class="card">
     <div class="top-actions">
@@ -2205,6 +2228,9 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
         <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span><button type="button" id="fr-filter-clear-quick" class="button secondary" hidden>Clear filters</button></div>
         <div class="fr-actions">
+          <label for="fr-category">Category for selected approved rows</label>
+          <select id="fr-category" aria-label="Category for selected approved rows" disabled><option value="">Choose category</option>{category_options}<option value="__clear__">Remove category</option></select>
+          <button type="button" class="button secondary" id="fr-category-assign" disabled>Assign category</button>
           <button type="button" class="fr-icon fr-approve" data-bulk="approve" title="Approve selected (Shift+A)" aria-label="Approve selected" aria-keyshortcuts="Shift+A" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span>Approve</span></button>
           <button type="button" class="fr-icon fr-dispute" data-bulk="reject" title="Dispute selected (Shift+D)" aria-label="Dispute selected" aria-keyshortcuts="Shift+D" disabled>
