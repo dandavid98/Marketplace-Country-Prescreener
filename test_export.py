@@ -97,6 +97,25 @@ class ExportTests(unittest.TestCase):
             finally:
                 workbook.close()
 
+    def test_false_positives_is_display_only_label(self):
+        page = app.queue_page(state="not_queued", country_signal="all", job="scan-a").body.decode()
+        self.assertIn('False Positives (1)', page)
+        self.assertIn('state=not_queued', page)
+        self.assertIn('value="not_queued" selected', page)
+        self.assertNotIn('Not Queued', page)
+        self.assertEqual(app.count_reviews('not_queued', job_id='scan-a'), 1)
+        path = app.export_reviews_xlsx(job_id='scan-a', scope='not_queued')
+        self.addCleanup(path.unlink, missing_ok=True)
+        workbook = load_workbook(path, read_only=True)
+        try:
+            rows = list(workbook.active.values)
+            self.assertEqual(rows[1][rows[0].index('Review Status')], 'False Positives')
+        finally:
+            workbook.close()
+        script = (Path(__file__).parent / 'static' / 'fast_review.js').read_text()
+        self.assertIn("not_queued: 'False Positives'", script)
+        self.assertIn("pending: 'Pending'", script)
+
     def test_queue_page_has_export_choices(self):
         page = app.queue_page(state="approved", country_signal="all", job="scan-a").body.decode()
         self.assertIn('value="approved" selected', page)

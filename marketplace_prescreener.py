@@ -747,7 +747,7 @@ def update_review_state(record_id: int, review_state: str) -> None:
     update_review_states([record_id], review_state)
 
 
-STATE_TAB_LABELS = {"pending": "Pending", "approved": "Approved", "rejected": "Disputed", "not_queued": "Not Queued"}
+STATE_TAB_LABELS = {"pending": "Pending", "approved": "Approved", "rejected": "Disputed", "not_queued": "False Positives"}
 REMEMBERED_LABELS = {decision_memory.AUTO_DISPUTED: "Auto-disputed", decision_memory.APPROVED_BEFORE: "Approved before"}
 
 
@@ -780,7 +780,7 @@ def update_review_states(record_ids: list[int], review_state: str) -> tuple[int,
 
 EXPORT_SCOPES = {
     "all": "Whole scan", "match": "Confirmed matches", "approved": "Approved",
-    "pending": "Pending", "rejected": "Disputed", "not_queued": "Not queued",
+    "pending": "Pending", "rejected": "Disputed", "not_queued": "False Positives",
 }
 ExportScope = Literal["all", "match", "approved", "pending", "rejected", "not_queued"]
 
@@ -2223,7 +2223,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         <label for="fr-lanes">Triage filter</label><select id="fr-lanes" aria-label="Triage filter"></select>
         <button type="button" id="fr-filter-open" class="button secondary">Filter Builder <span id="fr-filter-count"></span></button>
         <label><input type="checkbox" id="fr-group"> One row per item ID</label>
-        <span class="tiny" id="fr-triage-note">Walmart-sold listings are already Not Queued. <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
+        <span class="tiny" id="fr-triage-note">Walmart-sold listings appear under False Positives (not flagged for review). <a href="/queue?state=not_queued&amp;country_signal=all&amp;job=all&amp;lane=walmart">Open Walmart-sold across all scans</a>. Seller evidence flags need verification, not automatic decisions.</span>
       </div>
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
         <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span><button type="button" id="fr-filter-clear-quick" class="button secondary" hidden>Clear filters</button></div>

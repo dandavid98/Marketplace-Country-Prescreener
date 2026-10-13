@@ -13,7 +13,7 @@
 
   var LABELS = { approve: 'Approved', reject: 'Disputed', unset: 'Set back to pending' };
   var STATE_FOR = { approve: 'approved', reject: 'rejected', unset: 'pending' };
-  var REVIEW_LABELS = { approved: 'Approved', rejected: 'Disputed', pending: 'Pending', not_queued: 'Not queued' };
+  var REVIEW_LABELS = { approved: 'Approved', rejected: 'Disputed', pending: 'Pending', not_queued: 'False Positives' };
   // decision memory (decision_memory.py): why a row got its state without you clicking it
   var REMEMBERED = {
     auto_disputed: { label: 'auto', title: 'Auto-disputed: you disputed this item ID before, so it skipped the pending queue.' },
@@ -342,7 +342,7 @@
             info.pending_repeats.toLocaleString() + ' other pending repeats may change through decision memory. ' +
             info.remembered_repeats.toLocaleString() + ' existing auto-disputed / approved-before copies may have their notes or state updated. ' +
             (info.without_item_id ? info.without_item_id + ' rows have no item ID and cannot be remembered. ' : '') +
-            (info.walmart_rows ? info.walmart_rows + ' Walmart-sold rows are already Not Queued; disputing them remembers the item ID. ' : '') +
+            (info.walmart_rows ? info.walmart_rows + ' Walmart-sold rows appear under False Positives (not flagged for review); disputing them remembers the item ID. ' : '') +
             'Preview is a snapshot; nothing changes until you confirm.';
           $('fr-preview').hidden = false;
           $('fr-confirm').focus();
