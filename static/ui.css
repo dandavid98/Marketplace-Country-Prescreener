@@ -136,6 +136,7 @@ svg.icon { width: 1rem; height: 1rem; flex-shrink: 0; fill: none; stroke: curren
   transition: background-color .15s, color .15s;
 }
 .shell-item .icon { width: 20px; height: 20px; }
+.shell-subitem { padding-left: 24px; font-size: 13px; }
 .shell-item:hover { background: var(--nav-hover-bg); color: var(--nav-text-hover); }
 .shell-item[aria-current="page"] { background: var(--nav-active-bg); color: var(--nav-active-text); }
 .shell-foot { border-top: 1px solid var(--nav-border); padding: 8px; display: flex; }
@@ -181,7 +182,8 @@ svg.icon { width: 1rem; height: 1rem; flex-shrink: 0; fill: none; stroke: curren
   .shell-item { justify-content: center; padding: 12px; }
   .shell-label, .shell-foot { display: none; }
   .shell-content { padding: 16px; }
-  .fr-toolbar { top: -16px; flex-wrap: wrap; }
+  .fr-toolbar { flex-wrap: wrap; }
+  .fr-panel { max-height: calc(100vh - 100px); }   /* page padding is 16px here */
 }
 
 /* ---------- button (components/ui/button.tsx) -------------------------------- */
@@ -286,7 +288,7 @@ tbody tr:hover td { background: color-mix(in oklab, var(--muted) 50%, transparen
 .group-item { transition: opacity .15s ease; }
 .table-scroll { overflow: auto; max-height: 430px; border: 1px solid var(--border); border-radius: var(--radius); }
 .table-scroll table { margin-top: 0; }
-.table-scroll table[data-resizable] thead th, .table-scroll .listing-table thead th { position: sticky; top: 0; z-index: 1; background: var(--card); box-shadow: 0 1px 0 var(--border); }
+.table-scroll table[data-resizable] thead th, .table-scroll .listing-table thead th, .fr-scroll .listing-table thead th { position: sticky; top: 0; z-index: 1; background: var(--card); box-shadow: 0 1px 0 var(--border); }
 table[data-resizable] { table-layout: fixed; }
 table[data-resizable] th { position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 16px; }
 .col-resize-handle { position: absolute; top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }
@@ -316,13 +318,29 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .filter-row input, .filter-row select { height: 28px; padding: 2px 8px; font-size: 12px; }
 
 /* ---------- Fast Review (static/fast_review.js): ProductWatch FastReviewTable toolbar ---------- */
-.fr-panel { border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; overflow: clip; }  /* clip, not hidden: hidden would break the sticky toolbar */
+/* PW FastReviewTable layout: toolbar on top, table scrolls inside. The panel is sized so it
+   fits on screen even with the page scrolled all the way down: 100vh minus the app header
+   (48px) and everything under the panel (card padding 16 + border 1 + margin 16 + page
+   padding 24 = 57px). So the toolbar, column headers and filters can never scroll away. */
+.fr-panel {
+  border: 1px solid var(--border); border-radius: var(--radius); margin-top: 12px; overflow: clip;
+  display: flex; flex-direction: column; max-height: calc(100vh - 108px);
+}
+.fr-panel > * { flex: none; }
 .fr-panel table { margin-top: 0; }
+.fr-scroll { flex: 0 1 auto; min-height: 0; overflow: auto; scroll-padding-top: var(--thead-h, 90px); }
+.fr-scroll:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+/* keep the per-row Approve / Dispute buttons in view while scrolling sideways */
+.fr-scroll .listing-table th:last-child, .fr-scroll .listing-table td:last-child {
+  position: sticky; right: 0; background: var(--card); box-shadow: inset 1px 0 0 var(--border);
+}
+.fr-scroll .listing-table thead th:last-child { z-index: 2; }
+.fr-scroll .listing-table tbody tr.fr-selected-row td:last-child { background: color-mix(in oklab, var(--fr-accent) 9%, var(--card)); }
 /* queue has 12 fixed-width columns (~1124px); without this Title gets squeezed to 0px */
 #queue-table { min-width: 1420px; }
 #queue-table .col-id { width: 124px; }   /* 11-digit item IDs on one line */
 .fr-toolbar {
-  position: sticky; top: -24px; z-index: 3;   /* -24px = .shell-content padding, so no rows peek above it */ display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
   padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--border);
   background: color-mix(in oklab, var(--muted) 70%, var(--card));
 }
@@ -361,7 +379,7 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .fr-row-actions { display: flex; gap: 4px; }
 .badge.remembered { margin-left: 4px; border-color: var(--border); background: transparent; color: var(--muted-foreground); font-weight: 500; cursor: help; }
 .fr-row-actions .button { height: 26px; padding: 0 8px; font-size: 12px; }
-.table-scroll .listing-table thead tr.filter-row th { top: var(--filter-row-top, 37px); }
+.table-scroll .listing-table thead tr.filter-row th, .fr-scroll .listing-table thead tr.filter-row th { top: var(--filter-row-top, 37px); }
 .listing-table tfoot td { border-bottom: 0; }
 .listing-table tfoot .button { height: 26px; margin-left: 8px; font-size: 12px; }
 .listing-table td.table-actions .button { margin-bottom: 6px; }
@@ -371,7 +389,17 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .tiny { color: var(--muted-foreground); font-size: 12px; }
 .row-actions, .top-actions, .toolbar, .table-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .row-actions { margin-top: 10px; }
-.top-actions { margin-bottom: 10px; }
+.history-list { display: grid; gap: 12px; margin-top: 14px; }
+.history-entry { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.history-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.history-entry .tiny { margin: 8px 0; }
+.history-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; margin: 12px 0 0; }
+.history-fields > div { min-width: 0; }
+.history-fields dt { color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
+.history-fields dd { margin: 4px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.top-actions { margin-bottom: 10px; align-items: center; }
+.export-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
+.export-controls select { width: auto; max-width: 100%; }
 .toolbar { align-items: end; }
 .bar { height: 6px; background: color-mix(in oklab, var(--primary) 15%, transparent); border-radius: 999px; overflow: hidden; margin: 10px 0 12px; }
 .bar > div { height: 100%; width: 33%; background: var(--primary); border-radius: 999px; animation: slide 1.2s ease-in-out infinite; }

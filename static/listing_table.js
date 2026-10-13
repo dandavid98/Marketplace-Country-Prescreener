@@ -238,8 +238,11 @@
     function syncStickyOffset() {
       var h = table.tHead.rows[0].getBoundingClientRect().height;
       if (h) table.style.setProperty('--filter-row-top', Math.round(h) + 'px');
+      // scroll box keeps keyboard-focused rows clear of the sticky header
+      var all = table.tHead.getBoundingClientRect().height;
+      if (all && table.parentElement) table.parentElement.style.setProperty('--thead-h', Math.round(all) + 'px');
     }
-    if (global.ResizeObserver) new ResizeObserver(syncStickyOffset).observe(table.tHead.rows[0]);
+    if (global.ResizeObserver) new ResizeObserver(syncStickyOffset).observe(table.tHead);
 
     return {
       setRows: function (rows) { state.rows = rows || []; render(); },
