@@ -1,12 +1,12 @@
-"""Approved-row categories, from ProductWatch's default quickCategoryStore list.
+"""Approved-row categories from ProductWatch quick defaults plus user-supplied labels.
 
 Labels belong to saved review rows, not product taxonomy or item-ID decision memory.
 """
 import sqlite3
 from pathlib import Path
 
-# ProductWatch frontend/src/stores/quickCategoryStore.ts, DEFAULT_QUICK_CATEGORIES.
-# Preserve its spelling for interoperability with existing ProductWatch labels.
+# ProductWatch frontend/src/stores/quickCategoryStore.ts defaults, supplemented
+# with labels supplied by Daniel. Keep his exact spelling, including "Hygi".
 CATEGORIES = (
     "Trademark Infringement Media",
     "Perscription Medical Devices",
@@ -14,6 +14,9 @@ CATEGORIES = (
     "Sex Toys",
     "IP Rights Infringement Apparel",
     "IP Rights Infringement Cosmetics",
+    "IP Rights Infringement Food and Beverage",
+    "IP Rights Infringement Household and Cleaning",
+    "IP Rights Infringement Personal Care and Hygi",
     "IP Rights Infringement Media",
     "Trademark Infringement Apparel",
     "IP Rights Infringement Nutraceuticals",

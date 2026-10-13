@@ -35,11 +35,22 @@ class ReviewCategoryTests(unittest.TestCase):
         with sqlite3.connect(self.db) as conn:
             return dict(conn.execute('select id, review_category from reviews'))
 
-    def test_productwatch_defaults_and_idempotent_migration(self):
-        self.assertEqual(len(review_categories.CATEGORIES), 11)
-        self.assertIn('Trademark Infringement Media', review_categories.CATEGORIES)
+    def test_productwatch_defaults_user_labels_and_idempotent_migration(self):
+        self.assertEqual(len(review_categories.CATEGORIES), 14)
+        self.assertEqual(len(set(review_categories.CATEGORIES)), 14)
+        for name in (
+            'IP Rights Infringement Food and Beverage',
+            'IP Rights Infringement Household and Cleaning',
+            'IP Rights Infringement Personal Care and Hygi',
+            'Trademark Infringement Media',
+            'IP Rights Infringement Cosmetics',
+        ):
+            with self.subTest(category=name):
+                self.assertIn(name, review_categories.CATEGORIES)
+                self.assertEqual(review_categories.assign(self.db, [1], name, 'scan-a'), 1)
+                self.assertEqual(self.categories()[1], name)
         app.init_db()
-        self.assertEqual(self.categories()[1], '')
+        self.assertEqual(self.categories()[1], 'IP Rights Infringement Cosmetics')
 
     def test_selected_approved_rows_only_and_clear(self):
         category = 'Trademark Infringement Media'
