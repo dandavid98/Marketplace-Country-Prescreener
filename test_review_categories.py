@@ -1,4 +1,4 @@
-"""Approved-only row categories: migration, atomic writes, scope, and decisions."""
+"""Review-row categories: migration, atomic writes, scope, and decisions."""
 import sqlite3
 import tempfile
 import unittest
@@ -22,7 +22,7 @@ class ReviewCategoryTests(unittest.TestCase):
             for rid, job, item, state in [
                 (1, 'scan-a', 'A', 'approved'), (2, 'scan-a', 'B', 'approved'),
                 (3, 'scan-a', 'C', 'pending'), (4, 'scan-b', 'A', 'approved'),
-                (5, 'scan-a', 'D', 'rejected'),
+                (5, 'scan-a', 'D', 'rejected'), (6, 'scan-a', 'E', 'not_queued'),
             ]:
                 conn.execute('''insert into reviews
                   (id, job_id, item_id, scan_status, review_state, keyword, search_url,
@@ -56,17 +56,42 @@ class ReviewCategoryTests(unittest.TestCase):
     def test_selected_approved_rows_only_and_clear(self):
         category = 'Trademark Infringement Media'
         self.assertEqual(review_categories.assign(self.db, [1, 2, 1], category, 'scan-a'), 2)
-        self.assertEqual(self.categories(), {1: category, 2: category, 3: '', 4: '', 5: ''})
+        self.assertEqual(self.categories(), {1: category, 2: category, 3: '', 4: '', 5: '', 6: ''})
         self.assertEqual(review_categories.assign(self.db, [1], 'Sex Toys', 'scan-a'), 1)
         self.assertEqual(self.categories()[1], 'Sex Toys')
         self.assertEqual(review_categories.assign(self.db, [1], '', 'scan-a'), 1)
         self.assertEqual(self.categories()[1], '')
         self.assertEqual(app.get_reviews('approved', job_id='scan-a')[0]['review_category'], category)
 
-    def test_atomic_rejection_of_pending_disputed_wrong_scan_and_unknown_category(self):
+    def test_pending_and_not_queued_can_be_categorized_before_approval(self):
         category = 'Trademark Infringement Media'
-        for ids, name, scope in [([1, 3], category, 'scan-a'),
-                                 ([1, 5], category, 'scan-a'),
+        self.assertEqual(app.api_review_category([3, 6], category, 'scan-a').status_code, 200)
+        self.assertEqual(self.categories()[3], category)
+        self.assertEqual(self.categories()[6], category)
+        app.update_review_states([3, 6], 'approved')
+        self.assertEqual(self.categories()[3], category)
+        self.assertEqual(self.categories()[6], category)
+        app.update_review_states([3], 'pending')
+        self.assertEqual(self.categories()[3], category)
+        app.update_review_states([3], 'rejected')
+        self.assertEqual(self.categories()[3], '')
+        self.assertEqual(self.categories()[6], category)
+
+    def test_disputing_one_item_clears_pending_repeat_categories(self):
+        category = 'Trademark Infringement Media'
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("insert into reviews (job_id, item_id, scan_status, review_state, keyword, search_url, listing_url, title, seller_name, ship_from_country, target_country, country_signal, evidence, created_at) values ('scan-b', 'C', 'match', 'pending', 'soap', '', '', 'soap', '', '', 'China', 'China', '', '')")
+            repeat_id = conn.execute('select max(id) from reviews').fetchone()[0]
+        review_categories.assign(self.db, [3], category, 'scan-a')
+        review_categories.assign(self.db, [repeat_id], category, 'scan-b')
+        app.update_review_states([3], 'rejected')
+        with sqlite3.connect(self.db) as conn:
+            self.assertEqual(conn.execute('select review_state, review_category from reviews where id = ?',
+                                          (repeat_id,)).fetchone(), ('rejected', ''))
+
+    def test_atomic_rejection_of_disputed_wrong_scan_and_unknown_category(self):
+        category = 'Trademark Infringement Media'
+        for ids, name, scope in [([1, 5], category, 'scan-a'),
                                  ([1, 4], category, 'scan-a'),
                                  ([1, 99], category, 'scan-a'),
                                  ([1], 'Made up', 'scan-a'),
@@ -90,7 +115,7 @@ class ReviewCategoryTests(unittest.TestCase):
         self.assertEqual(self.categories()[4], 'Adult Content')
         self.assertEqual(app.api_review_category([1], category, 'scan-a').status_code, 400)
         app.update_review_states([2], 'pending')
-        self.assertEqual(self.categories()[2], '')
+        self.assertEqual(self.categories()[2], category)
 
 
 if __name__ == '__main__':

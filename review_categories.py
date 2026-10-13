@@ -1,4 +1,4 @@
-"""Approved-row categories from ProductWatch quick defaults plus user-supplied labels.
+"""Review-row categories from ProductWatch quick defaults plus user-supplied labels.
 
 Labels belong to saved review rows, not product taxonomy or item-ID decision memory.
 """
@@ -33,7 +33,7 @@ def init_categories(conn: sqlite3.Connection) -> None:
 
 
 def assign(db_path: Path, ids: list[int], category: str, job_id: str | None = None) -> int:
-    """All-or-nothing assignment to approved saved rows in the requested scan scope."""
+    """All-or-nothing assignment to non-disputed saved rows in the requested scan scope."""
     if category and category not in CATEGORIES:
         raise ValueError("Unknown review category")
     if not ids or len(ids) > 5000 or any(type(row_id) is not int or row_id <= 0 for row_id in ids):
@@ -45,13 +45,13 @@ def assign(db_path: Path, ids: list[int], category: str, job_id: str | None = No
         for offset in range(0, len(unique), 500):
             part = unique[offset:offset + 500]
             q = ",".join("?" for _ in part)
-            where = f"id in ({q}) and review_state = 'approved'"
+            where = f"id in ({q}) and review_state in ('pending', 'approved', 'not_queued')"
             params = list(part)
             if job_id:
                 where += " and job_id = ?"
                 params.append(job_id)
             if conn.execute(f"select count(*) from reviews where {where}", params).fetchone()[0] != len(part):
-                raise ValueError("Every selected row must exist, be approved, and belong to this scan")
+                raise ValueError("Every selected row must exist, not be disputed, and belong to this scan")
         for offset in range(0, len(unique), 500):
             part = unique[offset:offset + 500]
             conn.execute(f"update reviews set review_category = ? where id in ({','.join('?' for _ in part)})",

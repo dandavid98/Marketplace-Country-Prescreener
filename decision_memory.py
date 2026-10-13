@@ -105,7 +105,7 @@ def _cascade(conn: sqlite3.Connection, item_ids: list[str], review_state: str) -
     changed += _in_chunks(conn, f"update reviews set remembered = '' "
                                 f"where remembered = '{APPROVED_BEFORE}' and item_id in ({{q}})", item_ids)
     if review_state == "rejected":
-        changed += _in_chunks(conn, f"update reviews set review_state = 'rejected', remembered = '{AUTO_DISPUTED}' "
+        changed += _in_chunks(conn, f"update reviews set review_state = 'rejected', remembered = '{AUTO_DISPUTED}', review_category = '' "
                                     f"where review_state = 'pending' and item_id in ({{q}})", item_ids)
     elif review_state == "approved":
         changed += _in_chunks(conn, f"update reviews set remembered = '{APPROVED_BEFORE}' "

@@ -768,8 +768,8 @@ def update_review_states(record_ids: list[int], review_state: str) -> tuple[int,
                                (review_state, *chunk))
             changed += cur.rowcount
         cascaded = decision_memory.record_decisions(conn, record_ids, review_state, utc_now())
-        if review_state != "approved":
-            # A changed decision invalidates the selected rows' approved-only labels.
+        if review_state == "rejected":
+            # A dispute invalidates labels, including labels assigned before approval.
             for start in range(0, len(record_ids), 500):
                 chunk = record_ids[start:start + 500]
                 conn.execute(f"update reviews set review_category = '' where id in ({','.join('?' * len(chunk))})",
@@ -817,7 +817,7 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
             row.get("country_signal", ""),
             (row.get("match_kind") or "exact").capitalize(),
             STATE_TAB_LABELS.get(row.get("review_state"), row.get("review_state", "")),
-            row.get("review_category", "") if row.get("review_state") == "approved" else "",
+            row.get("review_category", ""),
             REMEMBERED_LABELS.get(row.get("remembered") or "", ""),
         ]
         if any_counterfeit_checked:
@@ -2228,8 +2228,8 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       <div class="fr-toolbar" role="toolbar" aria-label="Fast review">
         <div class="fr-count"><span id="fr-rowcount">Loading...</span> <span id="fr-selected" class="fr-selected" hidden></span><span id="fr-pagination" class="tiny" aria-live="polite"></span><button type="button" id="fr-filter-clear-quick" class="button secondary" hidden>Clear filters</button></div>
         <div class="fr-actions">
-          <label for="fr-category">Category for selected approved rows</label>
-          <select id="fr-category" aria-label="Category for selected approved rows" disabled><option value="">Choose category</option>{category_options}<option value="__clear__">Remove category</option></select>
+          <label for="fr-category">Category for selected rows (except disputed)</label>
+          <select id="fr-category" aria-label="Category for selected rows (except disputed)" disabled><option value="">Choose category</option>{category_options}<option value="__clear__">Remove category</option></select>
           <button type="button" class="button secondary" id="fr-category-assign" disabled>Assign category</button>
           <button type="button" class="fr-icon fr-approve" data-bulk="approve" title="Approve selected (Shift+A)" aria-label="Approve selected" aria-keyshortcuts="Shift+A" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg><span>Approve</span></button>

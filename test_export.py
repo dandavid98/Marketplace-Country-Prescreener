@@ -63,7 +63,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self.export_keywords("scan-a", "match", {3, 4, 5})], ["disputed"])
         self.assertEqual(self.export_keywords("scan-a", "all", set()), [])
 
-    def test_category_is_exported_only_for_approved_rows(self):
+    def test_category_exported_for_pending_and_approved_rows(self):
         with sqlite3.connect(app.DB_PATH) as conn:
             conn.execute("update reviews set review_category = 'Trademark Infringement Media' where id in (1, 2)")
         path = app.export_reviews_xlsx(job_id='scan-a')
@@ -76,7 +76,8 @@ class ExportTests(unittest.TestCase):
         category_index = rows[0].index('Review Category')
         self.assertEqual(next(row[category_index] for row in rows[1:] if row[0] == 'approved'),
                          'Trademark Infringement Media')
-        self.assertIsNone(next(row[category_index] for row in rows[1:] if row[0] == 'pending'))
+        self.assertEqual(next(row[category_index] for row in rows[1:] if row[0] == 'pending'),
+                         'Trademark Infringement Media')
 
     def test_saved_scan_negatives_survive_export(self):
         db = Path(self.folder.name) / "fresh.sqlite3"

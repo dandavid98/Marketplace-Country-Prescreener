@@ -123,8 +123,8 @@
       ],
       extraColumns: [
         { key: 'review_category', label: 'Category', thClass: 'col-mid', filter: 'select',
-          value: function (r) { return r.review_state === 'approved' ? (r.review_category || '') : ''; },
-          cell: function (r) { return esc(r.review_state === 'approved' ? (r.review_category || '') : ''); } },
+          value: function (r) { return r.review_category || ''; },
+          cell: function (r) { return esc(r.review_category || ''); } },
         { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select',
           value: reviewLabel,
           cell: function (r) {
@@ -201,7 +201,7 @@
         (n > onScreen ? ', ' + (n - onScreen).toLocaleString() + ' not on screen' : '') + ')';
       document.querySelectorAll('[data-bulk], #fr-clear').forEach(function (b) { b.disabled = n === 0 || busy; });
       var eligible = n > 0 && selectedRows().length === n && selectedRows().every(function (row) {
-        return (row.copies || [row]).every(function (copy) { return copy.review_state === 'approved'; });
+        return (row.copies || [row]).every(function (copy) { return copy.review_state !== 'rejected'; });
       });
       $('fr-category').disabled = !eligible || busy || previewBusy || !$('fr-preview').hidden;
       $('fr-category-assign').disabled = !eligible || busy || previewBusy || !$('fr-preview').hidden || !$('fr-category').value;
@@ -271,11 +271,11 @@
       var category = $('fr-category').value;
       var ids = directIds(selectedRows());
       if (!category || !ids.length || ids.length > 5000) {
-        say('Choose at most 5,000 approved saved rows and a category.', false, true);
+        say('Choose at most 5,000 non-disputed saved rows and a category.', false, true);
         return;
       }
       if (!window.confirm((category === '__clear__' ? 'Remove category from ' : 'Assign ' + category + ' to ') +
-          ids.length.toLocaleString() + ' selected approved rows?')) return;
+          ids.length.toLocaleString() + ' selected rows?')) return;
       busy = true;
       paint();
       fetch('/api/review/category', {
@@ -285,9 +285,8 @@
         if (!res.ok) return res.json().then(function (body) { throw new Error(body.error || 'HTTP ' + res.status); });
         return res.json();
       }).then(function (result) {
-        selected.clear();
         $('fr-category').value = '';
-        say('Categorized ' + result.updated.toLocaleString() + ' approved rows.', false);
+        say('Categorized ' + result.updated.toLocaleString() + ' rows. Selection kept for your next action.', false);
         return reload();
       }).catch(function (err) { say('Could not assign category: ' + err.message, false, true); })
         .then(function () { busy = false; paint(); });
