@@ -55,6 +55,10 @@
       storageKey: 'prescreener_queue',
       emptyText: 'No items in this queue view.',
       leadColumns: [selectColumn],
+      afterTitleColumns: [
+        { key: 'listing_brand', label: 'Listing Brand', thClass: 'col-mid', filter: 'text',
+          value: function (r) { return r.listing_brand || ''; } }
+      ],
       extraColumns: [
         { key: 'review', label: 'Review', thClass: 'col-short', filter: 'select',
           value: reviewLabel,
@@ -310,9 +314,9 @@
           table.setRows(rows);
         });
     }
-    tableEl.tBodies[0].innerHTML = '<tr><td colspan="13" class="muted">Loading queue...</td></tr>';
+    tableEl.tBodies[0].innerHTML = '<tr><td colspan="14" class="muted">Loading queue...</td></tr>';
     reload().catch(function (err) {
-      tableEl.tBodies[0].innerHTML = '<tr><td colspan="13" class="muted">Couldn\'t load the queue (' +
+      tableEl.tBodies[0].innerHTML = '<tr><td colspan="14" class="muted">Couldn\'t load the queue (' +
         esc(err.message) + '). Refresh to try again.</td></tr>';
     });
   }

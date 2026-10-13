@@ -336,8 +336,8 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 }
 .fr-scroll .listing-table thead th:last-child { z-index: 2; }
 .fr-scroll .listing-table tbody tr.fr-selected-row td:last-child { background: color-mix(in oklab, var(--fr-accent) 9%, var(--card)); }
-/* queue has 12 fixed-width columns (~1124px); without this Title gets squeezed to 0px */
-#queue-table { min-width: 1420px; }
+/* queue has 14 columns; reserve space so Title and Listing Brand stay readable */
+#queue-table { min-width: 1540px; }
 #queue-table .col-id { width: 124px; }   /* 11-digit item IDs on one line */
 .fr-toolbar {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;

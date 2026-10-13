@@ -19,12 +19,22 @@ class QueueSelectionTests(unittest.TestCase):
             # No real review records or decisions are changed by this test.
                 page.route("**/api/queue?*", lambda route: route.fulfill(json=[
                     {"id": i, "item_id": str(i), "review_state": "pending",
-                     "scan_status": "match", "title": f"Listing {i}"} for i in range(1, 6)
+                     "scan_status": "match", "title": f"Listing {i}",
+                     "listing_brand": "Generic" if i == 1 else "Febreze"} for i in range(1, 6)
                 ]))
                 page.goto(URL)
                 boxes = page.locator("input[data-select-id]")
                 boxes.first.wait_for()
                 self.assertEqual(boxes.count(), 5)
+                headings = page.locator("#queue-table thead tr:first-child th")
+                labels = [heading.locator("button").inner_text().replace("↕", "").replace("↑", "").replace("↓", "").strip()
+                          if heading.locator("button").count() else heading.inner_text().strip()
+                          for heading in headings.all()]
+                self.assertEqual(labels[labels.index("Title") + 1:labels.index("Seller")], ["Listing Brand"])
+                self.assertEqual(page.locator("#queue-table tbody tr:first-child td").nth(labels.index("Listing Brand")).inner_text(), "Generic")
+                page.get_by_role("searchbox", name="Filter by Listing Brand").fill("Generic")
+                self.assertIn("1 of 5 rows", page.locator("#fr-rowcount").inner_text())
+                page.get_by_role("searchbox", name="Filter by Listing Brand").fill("")
 
                 boxes.nth(0).click()
                 self.assertTrue(boxes.nth(0).is_checked())

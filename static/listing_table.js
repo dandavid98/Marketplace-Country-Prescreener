@@ -9,6 +9,7 @@
    storageKey (optional): remembers sort + filters in sessionStorage, so they
    survive the full-page reload after Approve/Reject on the queue.
    leadColumns (optional): columns placed BEFORE the base ones (e.g. a select box).
+   afterTitleColumns (optional): columns placed after Title (e.g. queue listing brand).
    onRender(shownRows) (optional): called after every render with the rows on screen,
    in on-screen order. Rows with an `id` get <tr data-row-id="...">.
 
@@ -83,7 +84,10 @@
 
   function create(table, opts) {
     opts = opts || {};
-    var columns = (opts.leadColumns || []).concat(BASE_COLUMNS, opts.extraColumns || []);
+    var titleIndex = BASE_COLUMNS.findIndex(function (column) { return column.key === 'title'; }) + 1;
+    var columns = (opts.leadColumns || []).concat(
+      BASE_COLUMNS.slice(0, titleIndex), opts.afterTitleColumns || [],
+      BASE_COLUMNS.slice(titleIndex), opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
     var state = { rows: [], sortKey: null, sortDir: 'none', filters: {}, limit: pageSize, optionSigs: {} };
     var byKey = {};
