@@ -91,7 +91,8 @@ _SHELL_SCRIPT = """(function(){
 
 def _nav(active: str, latest_job_id: str | None) -> str:
     items = [("scan", "/", "New scan", "search")]
-    # Live scan only exists once a job has been started this session.
+    # A saved scan keeps the tab available after restart; its page explains
+    # that live progress is no longer in memory and links to saved results.
     if latest_job_id:
         items.append(("job", f"/job/{latest_job_id}", "Live scan", "activity"))
     items.append(("queue", "/queue", "Review queue", "list-checks"))

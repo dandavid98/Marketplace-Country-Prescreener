@@ -43,6 +43,31 @@ def update_status(db_path: Path, job: dict) -> None:
                      (job["status"], job.get("finished_at"), job["id"]))
 
 
+def latest_scan_id(db_path: Path) -> str | None:
+    """Find the latest saved scan, including legacy scans without a history row."""
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("""select job_id from (
+            select job_id, created_at from scan_history
+            union all
+            select job_id, max(created_at) as created_at from reviews group by job_id
+        ) order by created_at desc limit 1""").fetchone()
+    return row[0] if row else None
+
+
+def scan_summary(db_path: Path, job_id: str) -> dict | None:
+    """Small persisted summary for an archived scan's non-live page."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        saved = conn.execute("select * from scan_history where job_id = ?", (job_id,)).fetchone()
+        counts = conn.execute("""select count(*) as rows, sum(scan_status = 'match') as matches,
+                               min(created_at) as created_at from reviews where job_id = ?""", (job_id,)).fetchone()
+    if not saved and not counts["rows"]:
+        return None
+    return {"created_at": saved["created_at"] if saved else counts["created_at"],
+            "status": saved["status"] if saved and saved["finished_at"] else None,
+            "rows": counts["rows"], "matches": counts["matches"] or 0}
+
+
 def list_scans(db_path: Path) -> list[dict]:
     """Include legacy result-only jobs; don't infer missing toggles from their rows."""
     with sqlite3.connect(db_path) as conn:

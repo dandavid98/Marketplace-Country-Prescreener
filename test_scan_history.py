@@ -26,7 +26,7 @@ class ScanHistoryTests(unittest.TestCase):
             market="CA", negative_terms=["shirt", "poster"],
             generic_include=True, fuzzy_strictness=85, disguised_search=True,
         )
-        self.addCleanup(app.JOBS.pop, job_id)
+        self.addCleanup(app.JOBS.pop, job_id, None)
         scans = scan_history.list_scans(app.DB_PATH)
         entry = next(scan for scan in scans if scan["job_id"] == job_id)
         self.assertTrue(entry["complete"])
@@ -50,6 +50,13 @@ class ScanHistoryTests(unittest.TestCase):
         app.JOBS[job_id]["finished_at"] = "2026-10-13T12:00:00+00:00"
         scan_history.update_status(app.DB_PATH, app.JOBS[job_id])
         self.assertEqual(scan_history.list_scans(app.DB_PATH)[0]["status"], "done")
+        self.assertEqual(scan_history.latest_scan_id(app.DB_PATH), job_id)
+        archived = app.job_page(job_id).body.decode()
+        self.assertIn("Live log", archived)  # current-process jobs still show the live view
+        app.JOBS.pop(job_id)
+        self.assertIn("View saved results", app.job_page(job_id).body.decode())
+        self.assertIn(f'href="/job/{job_id}"', app.home().body.decode())
+        self.assertEqual(app.job_page("missing").status_code, 404)
 
     def test_legacy_rows_show_known_values_without_inventing_toggles(self):
         with sqlite3.connect(app.DB_PATH) as conn:
@@ -60,6 +67,8 @@ class ScanHistoryTests(unittest.TestCase):
                          ("legacy", "Febreze", "shirt, poster", "US", "China", "match",
                           "pending", "2026-01-01T00:00:00+00:00", "", "", "", "", "", "China", ""))
         entry = scan_history.list_scans(app.DB_PATH)[0]
+        self.assertEqual(scan_history.latest_scan_id(app.DB_PATH), "legacy")
+        self.assertIn("View saved results", app.job_page("legacy").body.decode())
         self.assertFalse(entry["complete"])
         self.assertEqual(entry["criteria"]["keywords"], ["Febreze"])
         self.assertEqual(entry["criteria"]["negative_terms"], ["shirt, poster"])

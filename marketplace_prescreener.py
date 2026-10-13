@@ -1416,7 +1416,8 @@ document.addEventListener('DOMContentLoaded', restorePrescreenerPrefs);
 def html_page(title: str, body: str, extra_script: str = "", *, active: str = "", subtitle: str = "", scripts: tuple[str, ...] = ()) -> HTMLResponse:
     """All pages render through the ProductWatch-style shell (ui_shell.py + static/ui.css)."""
     return render_page(title, body, active=active, subtitle=subtitle, extra_script=extra_script,
-                       latest_job_id=LATEST_JOB_ID, doc_title=APP_TITLE, scripts=scripts)
+                       latest_job_id=LATEST_JOB_ID or scan_history.latest_scan_id(DB_PATH),
+                       doc_title=APP_TITLE, scripts=scripts)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1612,6 +1613,25 @@ def scan(
 
 @app.get("/job/{job_id}", response_class=HTMLResponse)
 def job_page(job_id: str) -> HTMLResponse:
+    if job_id not in JOBS:
+        summary = scan_history.scan_summary(DB_PATH, job_id)
+        if not summary:
+            return HTMLResponse("Scan not found", status_code=404)
+        safe_id = html_escape(job_id, quote=True)
+        state = summary["status"] or "Finished or stopped before restart (status not recorded)"
+        body = f'''<div class="card">
+          <p>This scan is archived. Live progress and logs were kept only while the server was running;
+             restarting it does not delete saved results or review decisions.</p>
+          <div class="summary"><span class="pill">Scan: {safe_id}</span>
+            <span class="pill">Started: {html_escape(summary["created_at"])}</span>
+            <span class="pill">Status: {html_escape(state)}</span>
+            <span class="pill">Saved rows: {summary["rows"]:,}</span>
+            <span class="pill">Confirmed matches: {summary["matches"]:,}</span></div>
+          <div class="row-actions"><a class="button" href="/queue?job={quote_plus(job_id)}&amp;country_signal=all">View saved results</a>
+            <a class="button secondary" href="/history">Scan history</a>
+            <a class="button secondary" href="/">New scan</a></div>
+        </div>'''
+        return html_page("Live scan", body, active="job", subtitle="Saved scan summary; live updates resume with a new scan.")
     body = f"""
   <div class="card">
     <div class="summary">
