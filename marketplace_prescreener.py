@@ -28,6 +28,8 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 import decision_memory
+import scan_history
+import scan_history_page
 from brand_signals import is_generic_brand
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
 from fuzzy_match import DEFAULT_STRICTNESS, SHORT_WORD_MAX, KeywordMatch, allowed_edits, disguised_spellings, keyword_words, legacy_contains, match_keyword
@@ -659,6 +661,7 @@ def init_db() -> None:
         )
         decision_memory.init_memory(conn, extract_item_id)
         conn.commit()
+    scan_history.init_history(DB_PATH)
 
 
 init_db()
@@ -876,6 +879,7 @@ def create_job(keywords: list[str], country: str, limit: int, workers: int, mode
         "created_at": utc_now(),
         "finished_at": None,
     }
+    scan_history.save_scan(DB_PATH, job)
     with lock:
         JOBS[job_id] = job
         LATEST_JOB_ID = job_id
@@ -1266,6 +1270,8 @@ def run_job(job_id: str) -> None:
             job["message"] = f"Job failed: {exc}"
             job["finished_at"] = utc_now()
         append_log(job, job["message"])
+    finally:
+        scan_history.update_status(DB_PATH, job)
 
 
 RESIZABLE_TABLE_SCRIPT = """
@@ -2098,6 +2104,11 @@ def export_controls(job: str, state: str = "all") -> str:
             f'<button type="submit" class="button secondary">Download XLSX</button>'
             f'<button type="button" id="export-selected" class="button secondary" disabled>Export selected (0)</button>'
             f'</form>')
+
+
+@app.get("/history", response_class=HTMLResponse)
+def history_page() -> HTMLResponse:
+    return scan_history_page.render_history(DB_PATH, html_page)
 
 
 @app.get("/queue", response_class=HTMLResponse)

@@ -43,8 +43,9 @@ class GenericModeTests(unittest.TestCase):
         self.assertEqual(self.scan("Generic", "US", include=True, sold=True), "walmart_sold")
 
     def test_inclusive_job_and_old_toggle(self):
-        inclusive = app.create_job(["Febreze"], "China", 1, 1, "balanced", generic_include=True)
-        legacy = app.create_job(["Febreze"], "China", 1, 1, "balanced", generic_only=True)
+        with patch.object(app.scan_history, "save_scan"):
+            inclusive = app.create_job(["Febreze"], "China", 1, 1, "balanced", generic_include=True)
+            legacy = app.create_job(["Febreze"], "China", 1, 1, "balanced", generic_only=True)
         try:
             self.assertTrue(app.JOBS[inclusive]["generic_include"])
             self.assertFalse(app.JOBS[inclusive]["generic_only"])

@@ -22,6 +22,7 @@ _ICONS = {
     "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
     "activity": '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
     "list-checks": '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+    "history": '<path d="M3 12a9 9 0 1 0 2.6-6.4"/><path d="M3 4v4h4"/><path d="M12 7v5l3 2"/>',
     "house": '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     "chevron-right": '<path d="m9 18 6-6-6-6"/>',
     "panel-left-close": '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/>',
@@ -94,9 +95,10 @@ def _nav(active: str, latest_job_id: str | None) -> str:
     if latest_job_id:
         items.append(("job", f"/job/{latest_job_id}", "Live scan", "activity"))
     items.append(("queue", "/queue", "Review queue", "list-checks"))
+    items.append(("history", "/history", "Scan history", "history"))
     current = ' aria-current="page"'
     links = "".join(
-        f'<a class="shell-item" href="{html_escape(href)}" title="{label}"'
+        f'<a class="shell-item{" shell-subitem" if key == "history" else ""}" href="{html_escape(href)}" title="{label}"'
         f'{current if key == active else ""}>'
         f'{icon(ico)}<span class="shell-label">{label}</span></a>'
         for key, href, label, ico in items
