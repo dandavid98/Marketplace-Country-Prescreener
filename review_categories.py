@@ -18,6 +18,7 @@ CATEGORIES = (
     "IP Rights Infringement Household and Cleaning",
     "IP Rights Infringement Personal Care and Hygi",
     "IP Rights Infringement Utility Outdoor & Maintenence",
+    "IP Rights Infringement Power Tools",
     "IP Rights Infringement Media",
     "Trademark Infringement Apparel",
     "IP Rights Infringement Nutraceuticals",

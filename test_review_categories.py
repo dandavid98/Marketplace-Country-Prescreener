@@ -36,13 +36,14 @@ class ReviewCategoryTests(unittest.TestCase):
             return dict(conn.execute('select id, review_category from reviews'))
 
     def test_productwatch_defaults_user_labels_and_idempotent_migration(self):
-        self.assertEqual(len(review_categories.CATEGORIES), 15)
-        self.assertEqual(len(set(review_categories.CATEGORIES)), 15)
+        self.assertEqual(len(review_categories.CATEGORIES), 16)
+        self.assertEqual(len(set(review_categories.CATEGORIES)), 16)
         for name in (
             'IP Rights Infringement Food and Beverage',
             'IP Rights Infringement Household and Cleaning',
             'IP Rights Infringement Personal Care and Hygi',
             'IP Rights Infringement Utility Outdoor & Maintenence',
+            'IP Rights Infringement Power Tools',
             'Trademark Infringement Media',
             'IP Rights Infringement Cosmetics',
         ):
