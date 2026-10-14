@@ -799,13 +799,29 @@ EXPORT_SCOPES = {"all": "Whole scan", "match": "Confirmed matches", **STATE_TAB_
 ExportScope = Literal["all", "match", "approved", "pending", "repeat", "rejected", "not_queued"]
 
 
+NO_CATEGORY = "__none__"   # export-picker value for rows without a review category
+
+
+def parse_category_filter(category_filter: bool, categories: list[str]) -> set[str] | None:
+    """None = export every category. The picker always sends category_filter, so an empty
+    tick list is a mistake to report, never a silent 'export everything'."""
+    if not category_filter:
+        return None
+    wanted = set(categories)
+    if not wanted:
+        raise ValueError("Tick at least one category to export")
+    unknown = wanted - set(review_categories.CATEGORIES) - {NO_CATEGORY}
+    if unknown:
+        raise ValueError("Unknown review category")
+    return wanted
+
+
 def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
-                        selected_ids: set[int] | None = None, category: str = "",
+                        selected_ids: set[int] | None = None, categories: set[str] | None = None,
                         job_ids: list[str] | None = None) -> Path:
     """job_ids merges several scans into one sheet and adds Scan ID / Scan Date columns
-    so every row stays traceable; single-scan exports keep their existing columns."""
-    if category and category not in review_categories.CATEGORIES:
-        raise ValueError("Unknown review category")
+    so every row stays traceable; single-scan exports keep their existing columns.
+    `categories` keeps only rows in those categories (NO_CATEGORY = uncategorised)."""
     if job_ids:
         wanted = set(job_ids)
         rows = [row for row in get_reviews("all") if row["job_id"] in wanted]
@@ -818,8 +834,8 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
         rows = [row for row in rows if row["review_state"] == scope]
     if selected_ids is not None:
         rows = [row for row in rows if row["id"] in selected_ids]
-    if category:
-        rows = [row for row in rows if row.get("review_category") == category]
+    if categories is not None:
+        rows = [row for row in rows if (row.get("review_category") or NO_CATEGORY) in categories]
     any_counterfeit_checked = any(row.get("counterfeit_checked") for row in rows)
 
     wb = Workbook()
@@ -2181,19 +2197,24 @@ def api_review_category(ids: list[int] = Body(...), category: str = Body(...),
 
 
 def export_choice_fields(state: str = "all") -> str:
-    """Status + category dropdowns shared by the queue and multi-scan exports."""
+    """Status dropdown + category picker shared by the queue and multi-scan exports.
+    The picker is a checkbox list, all ticked: untick categories to withhold them."""
     options = "".join(
         f'<option value="{key}"{" selected" if key == state else ""}>{label}</option>'
         for key, label in EXPORT_SCOPES.items()
     )
-    category_options = "".join(
-        f'<option value="{html_escape(name, quote=True)}">{html_escape(name)}</option>'
-        for name in review_categories.CATEGORIES
+    boxes = "".join(
+        f'<label class="cat-pick-item"><input type="checkbox" name="categories" value="{html_escape(value, quote=True)}" checked> '
+        f'{html_escape(label)}</label>'
+        for value, label in [*((name, name) for name in review_categories.CATEGORIES), (NO_CATEGORY, "No category")]
     )
     return (f'<label for="export-scope">Export</label>'
             f'<select id="export-scope" name="scope">{options}</select>'
-            f'<label for="export-category">Category</label>'
-            f'<select id="export-category" name="category"><option value="">All categories</option>{category_options}</select>')
+            f'<details class="cat-pick" id="export-categories"><summary aria-live="polite">Categories: <span class="cat-pick-summary">All</span></summary>'
+            f'<input type="hidden" name="category_filter" value="1">'
+            f'<div class="cat-pick-actions"><button type="button" class="button secondary" data-cat-all>Tick all</button>'
+            f'<button type="button" class="button secondary" data-cat-none>Untick all</button></div>'
+            f'<fieldset><legend class="tiny">Untick any category you want to withhold from the export.</legend>{boxes}</fieldset></details>')
 
 
 def export_controls(job: str, state: str = "all") -> str:
@@ -2245,7 +2266,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
     <div class="top-actions">
       <a class="button" href="/">New scan</a>
       {export_controls(job, state if state in EXPORT_SCOPES else 'all')}
-      <span class="tiny">Exports use the scan shown, your chosen review status and export category; selected export uses checked rows within both. Country and column filters do not apply to whole-category exports.</span>
+      <span class="tiny">Exports use the scan shown, your chosen review status and the ticked categories; selected export uses checked rows within those. Country and column filters do not apply to whole-category exports.</span>
       {scope_toggle}
     </div>
     <p class="tiny" style="margin: 6px 0 0;">{html_escape(scope_note)}</p>
@@ -2316,7 +2337,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
 """
     params = json.dumps({"state": state, "country_signal": country_signal, "job": job}).replace("</", "<\\/")
     script = THUMB_PREVIEW_SCRIPT + QUEUE_TABLE_SCRIPT.replace("__QUEUE_PARAMS__", params)
-    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "review_triage.js", "review_filter.js", "review_filter_builder.js", "fast_review.js"),
+    return html_page("Review queue", body, script, active="queue", scripts=("listing_table.js", "review_triage.js", "review_filter.js", "review_filter_builder.js", "fast_review.js", "category_picker.js"),
                      subtitle="Approve or dispute prescreened listings, then export the evidence.")
 
 
@@ -2329,36 +2350,53 @@ def review_action(record_id: int, action: str, return_to: str = "/queue") -> Red
     return RedirectResponse(url=return_to, status_code=302)
 
 
+def _categories_or_error(category_filter: bool, categories: list[str], category: str) -> set[str] | None | JSONResponse:
+    """Shared by every export route. `category` is the old single-pick parameter; still
+    honoured so a bookmarked link never silently exports every category."""
+    if category:
+        category_filter, categories = True, [*categories, category]
+    try:
+        return parse_category_filter(category_filter, categories)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 @app.get("/export.xlsx")
 def export_xlsx(job: str = Query(default="latest"), scope: ExportScope = Query(default="all"),
+                category_filter: bool = Query(default=False), categories: list[str] = Query(default=[]),
                 category: str = Query(default="")) -> FileResponse:
-    if category and category not in review_categories.CATEGORIES:
-        return JSONResponse({"error": "Unknown review category"}, status_code=400)
-    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, category=category)
+    wanted = _categories_or_error(category_filter, categories, category)
+    if isinstance(wanted, JSONResponse):
+        return wanted
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, categories=wanted)
     return _xlsx_response(path, scope)
 
 
 @app.post("/export.xlsx")
 def export_selected_xlsx(ids: list[int] = Body(...), job: str = Query(default="latest"),
-                         scope: ExportScope = Query(default="all"), category: str = Query(default="")) -> FileResponse:
-    """Export checked queue records only, within the requested scan, scope and category."""
+                         scope: ExportScope = Query(default="all"), category_filter: bool = Query(default=False),
+                         categories: list[str] = Query(default=[]), category: str = Query(default="")) -> FileResponse:
+    """Export checked queue records only, within the requested scan, scope and categories."""
     if len(ids) > 5000:
         return JSONResponse({"error": "Select at most 5,000 rows per export"}, status_code=400)
-    if category and category not in review_categories.CATEGORIES:
-        return JSONResponse({"error": "Unknown review category"}, status_code=400)
-    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, selected_ids=set(ids), category=category)
+    wanted = _categories_or_error(category_filter, categories, category)
+    if isinstance(wanted, JSONResponse):
+        return wanted
+    path = export_reviews_xlsx(job_id=_queue_scope(job), scope=scope, selected_ids=set(ids), categories=wanted)
     return _xlsx_response(path, scope)
 
 
 @app.get("/export-scans.xlsx")
 def export_scans_xlsx(jobs: list[str] = Query(default=[]), scope: ExportScope = Query(default="all"),
+                      category_filter: bool = Query(default=False), categories: list[str] = Query(default=[]),
                       category: str = Query(default="")) -> FileResponse:
     """One workbook from the scans ticked on the Scan history page."""
     if not jobs:
         return JSONResponse({"error": "Tick at least one scan to export"}, status_code=400)
-    if category and category not in review_categories.CATEGORIES:
-        return JSONResponse({"error": "Unknown review category"}, status_code=400)
-    path = export_reviews_xlsx(scope=scope, category=category, job_ids=jobs)
+    wanted = _categories_or_error(category_filter, categories, category)
+    if isinstance(wanted, JSONResponse):
+        return wanted
+    path = export_reviews_xlsx(scope=scope, categories=wanted, job_ids=jobs)
     return _xlsx_response(path, f"{len(set(jobs))}_scans_{scope}")
 
 

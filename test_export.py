@@ -32,7 +32,8 @@ class ExportTests(unittest.TestCase):
             ])
 
     def export_keywords(self, job_id=None, scope="all", selected_ids=None, category=""):
-        path = app.export_reviews_xlsx(job_id=job_id, scope=scope, selected_ids=selected_ids, category=category)
+        categories = {category} if category else None
+        path = app.export_reviews_xlsx(job_id=job_id, scope=scope, selected_ids=selected_ids, categories=categories)
         self.addCleanup(path.unlink, missing_ok=True)
         workbook = load_workbook(path, read_only=True)
         try:
@@ -81,22 +82,22 @@ class ExportTests(unittest.TestCase):
         self.assertEqual([row[0] for row in self.export_keywords('scan-a', 'approved', {2, 5}, first)],
                          ['approved'])
         with self.assertRaises(ValueError):
-            self.export_keywords('scan-a', 'approved', category='Not a real category')
+            app.parse_category_filter(True, ['Not a real category'])
 
     def test_category_filter_via_download_routes(self):
         category = review_categories.CATEGORIES[0]
         with sqlite3.connect(app.DB_PATH) as conn:
             conn.execute('update reviews set review_category = ? where id in (2, 5)', (category,))
-        response = app.export_xlsx(job='scan-a', scope='approved', category=category)
+        response = app.export_xlsx(job='scan-a', scope='approved', category_filter=False, categories=[], category=category)
         self.addCleanup(response.path.unlink, missing_ok=True)
         sheet = list(load_workbook(response.path, read_only=True).active.values)
         self.assertEqual(len(sheet), 2)
         self.assertEqual(sheet[1][sheet[0].index('Review Category')], category)
-        response = app.export_selected_xlsx([2, 5], job='scan-a', scope='approved', category=category)
+        response = app.export_selected_xlsx([2, 5], job='scan-a', scope='approved', category_filter=False, categories=[], category=category)
         self.addCleanup(response.path.unlink, missing_ok=True)
         self.assertEqual(len(list(load_workbook(response.path, read_only=True).active.values)), 2)
-        for response in (app.export_xlsx(job='scan-a', scope='approved', category='Not a real category'),
-                         app.export_selected_xlsx([2], job='scan-a', scope='approved',
+        for response in (app.export_xlsx(job='scan-a', scope='approved', category_filter=False, categories=[], category='Not a real category'),
+                         app.export_selected_xlsx([2], job='scan-a', scope='approved', category_filter=False, categories=[],
                                                   category='Not a real category')):
             self.assertEqual(response.status_code, 400)
 
@@ -160,9 +161,56 @@ class ExportTests(unittest.TestCase):
         self.assertIn('value="match"', page)
         self.assertIn('id="export-selected"', page)
         self.assertIn('name="job" value="scan-a"', page)
-        self.assertIn('id="export-category" name="category"', page)
-        self.assertIn('<option value="">All categories</option>', page)
+        self.assertIn('id="export-categories"', page)
+        self.assertIn('name="category_filter" value="1"', page)
+        self.assertIn('name="categories" value="__none__" checked', page)
+        self.assertIn('category_picker.js', page)
         self.assertIn('IP Rights Infringement Utility Outdoor &amp; Maintenence', page)
+
+    def _sheet(self, response):
+        self.assertNotIsInstance(response, app.JSONResponse, getattr(response, "body", b""))
+        self.addCleanup(response.path.unlink, missing_ok=True)
+        return list(load_workbook(response.path, read_only=True).active.values)
+
+    def test_export_several_categories_and_withhold_the_rest(self):
+        food, home, care, media = ("IP Rights Infringement Food and Beverage",
+                                   "IP Rights Infringement Household and Cleaning",
+                                   "IP Rights Infringement Personal Care and Hygi",
+                                   "Trademark Infringement Media")
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.executemany("update reviews set review_category = ? where id = ?",
+                             [(food, 1), (home, 2), (care, 3), (media, 4)])   # row 5 stays uncategorised
+        sheet = self._sheet(app.export_xlsx(job="all", scope="all", category_filter=True,
+                                            categories=[food, home, care], category=""))
+        col = sheet[0].index("Review Category")
+        self.assertEqual(sorted(r[col] for r in sheet[1:]), sorted([food, home, care]))
+        self.assertNotIn(media, [r[col] for r in sheet[1:]])
+        # "No category" is its own tick box, so uncategorised rows can be included or withheld
+        sheet = self._sheet(app.export_xlsx(job="all", scope="all", category_filter=True,
+                                            categories=[food, app.NO_CATEGORY], category=""))
+        self.assertEqual(sorted(r[0] for r in sheet[1:]), ["other scan", "pending"])
+        # same picker on selected-row and multi-scan exports
+        sheet = self._sheet(app.export_selected_xlsx([1, 2, 4], job="all", scope="all", category_filter=True,
+                                                     categories=[food, home], category=""))
+        self.assertEqual(sorted(r[0] for r in sheet[1:]), ["approved", "pending"])
+        sheet = self._sheet(app.export_scans_xlsx(jobs=["scan-a", "scan-b"], scope="all", category_filter=True,
+                                                  categories=[care, media], category=""))
+        self.assertEqual(sorted(r[0] for r in sheet[1:]), ["disputed", "not queued"])
+
+    def test_category_picker_guards_and_old_links(self):
+        everything = self._sheet(app.export_xlsx(job="all", scope="all", category_filter=False,
+                                                 categories=[], category=""))
+        self.assertEqual(len(everything) - 1, 5)                         # no picker = all categories
+        nothing_ticked = app.export_xlsx(job="all", scope="all", category_filter=True, categories=[], category="")
+        self.assertEqual(nothing_ticked.status_code, 400)                # never a silent full export
+        self.assertIn(b"Tick at least one category", nothing_ticked.body)
+        bogus = app.export_xlsx(job="all", scope="all", category_filter=True, categories=["Nope"], category="")
+        self.assertEqual(bogus.status_code, 400)
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.execute("update reviews set review_category = 'Trademark Infringement Media' where id = 2")
+        old_link = self._sheet(app.export_xlsx(job="all", scope="all", category_filter=False, categories=[],
+                                               category="Trademark Infringement Media"))
+        self.assertEqual([r[0] for r in old_link[1:]], ["approved"])     # bookmarked ?category= still filters
 
     def test_multi_scan_export_merges_ticked_scans_with_traceable_columns(self):
         with sqlite3.connect(app.DB_PATH) as conn:
@@ -170,7 +218,7 @@ class ExportTests(unittest.TestCase):
                              [("scan-a", "2026-10-01T09:00:00+00:00"), ("scan-b", "2026-10-05T09:00:00+00:00")])
             conn.execute("insert into reviews (id,job_id,scan_status,review_state,country_signal,keyword,title,listing_url) "
                          "values (6, 'scan-c', 'match', 'approved', 'China', 'not ticked', 'item-6', 'url-6')")
-        response = app.export_scans_xlsx(jobs=["scan-a", "scan-b"], scope="approved", category="")
+        response = app.export_scans_xlsx(jobs=["scan-a", "scan-b"], scope="approved", category_filter=False, categories=[], category="")
         self.addCleanup(response.path.unlink, missing_ok=True)
         sheet = list(load_workbook(response.path, read_only=True).active.values)
         header, rows = sheet[0], sheet[1:]
@@ -179,8 +227,8 @@ class ExportTests(unittest.TestCase):
                          [("approved", "scan-a", "2026-10-01"), ("other scan", "scan-b", "2026-10-05")])
         self.assertEqual(response.filename, "prescreener_2_scans_approved.xlsx")
         self.assertNotIn("Scan ID", list(load_workbook(app.export_reviews_xlsx("scan-a"), read_only=True).active.values)[0])
-        self.assertEqual(app.export_scans_xlsx(jobs=[], scope="all", category="").status_code, 400)
-        self.assertEqual(app.export_scans_xlsx(jobs=["scan-a"], scope="all", category="Nope").status_code, 400)
+        self.assertEqual(app.export_scans_xlsx(jobs=[], scope="all", category_filter=False, categories=[], category="").status_code, 400)
+        self.assertEqual(app.export_scans_xlsx(jobs=["scan-a"], scope="all", category_filter=False, categories=[], category="Nope").status_code, 400)
 
     def test_history_page_offers_multi_scan_export(self):
         with sqlite3.connect(app.DB_PATH) as conn:
@@ -188,7 +236,7 @@ class ExportTests(unittest.TestCase):
             conn.execute("alter table reviews add column target_country text")
         page = app.history_page().body.decode()
         for text in ('action="/export-scans.xlsx"', 'type="date" id="range-from"',
-                     'name="jobs" value="scan-a" form="multi-export"', 'id="export-category" name="category"',
+                     'name="jobs" value="scan-a" form="multi-export"', 'id="export-categories"', 'category_picker.js',
                      'history_export.js'):
             with self.subTest(text=text):
                 self.assertIn(text, page)

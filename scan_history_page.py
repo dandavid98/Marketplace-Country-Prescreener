@@ -106,5 +106,5 @@ def render_history(db_path, html_page, state_labels: dict, export_choice_fields:
     body = f'''<div class="card">{_export_bar(export_choice_fields) if scans else ""}
       <p class="tiny">Newest first · {len(scans)} scan(s). Earlier scans show only settings preserved with their results; "Not recorded" does not mean a toggle was off.</p>
       <div class="history-list">{content}</div></div>'''
-    return html_page("Scan history", body, active="history", scripts=("history_export.js",),
+    return html_page("Scan history", body, active="history", scripts=("history_export.js", "category_picker.js"),
                      subtitle="Search criteria used for past scans, including keywords, negatives and matching options.")

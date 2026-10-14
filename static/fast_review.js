@@ -315,8 +315,11 @@
       button.disabled = true;
       var ids = directIds(selectedRows());
       if (!ids.length) return;
-      var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value,
-        category: $('export-category').value });
+      var query = new URLSearchParams({ job: params.job, scope: $('export-scope').value, category_filter: '1' });
+      document.querySelectorAll('#export-categories input[name="categories"]:checked').forEach(function (box) {
+        query.append('categories', box.value);
+      });
+      if (!query.has('categories')) { say('Tick at least one category to export.', false, true); paint(); return; }
       fetch('/export.xlsx?' + query, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ids)

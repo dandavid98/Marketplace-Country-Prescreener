@@ -459,6 +459,17 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .top-actions { margin-bottom: 10px; align-items: center; }
 .export-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
 .export-controls select { width: auto; max-width: 100%; }
+.cat-pick { position: relative; }
+.cat-pick > summary { cursor: pointer; padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--background); list-style-position: inside; }
+.cat-pick[open] > summary { border-color: var(--primary); }
+.cat-pick > :not(summary) { margin-top: 8px; }
+.cat-pick[open] { flex-basis: 100%; }
+.cat-pick fieldset { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin: 0;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 4px 16px; }
+.cat-pick legend { padding: 0 4px; }
+.cat-pick-item { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; min-height: 28px; cursor: pointer; }
+.cat-pick-item input { width: 18px; height: 18px; margin: 0; flex: none; }
+.cat-pick-actions { display: flex; gap: 8px; }
 .toolbar { align-items: end; }
 .bar { height: 6px; background: color-mix(in oklab, var(--primary) 15%, transparent); border-radius: 999px; overflow: hidden; margin: 10px 0 12px; }
 .bar > div { height: 100%; width: 33%; background: var(--primary); border-radius: 999px; animation: slide 1.2s ease-in-out infinite; }
