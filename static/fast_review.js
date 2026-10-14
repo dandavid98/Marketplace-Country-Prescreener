@@ -42,7 +42,9 @@
     var sourceRows = [];
     var lane = new URLSearchParams(location.search).get('lane') || 'all';
     if (!ReviewTriage.lanes.some(function (entry) { return entry[0] === lane; })) lane = 'all';
-    var grouped = false;
+    // Approved Before is all repeats of decided items, so one row per item is the useful default there.
+    var grouped = params.state === 'repeat';
+    $('fr-group').checked = grouped;
     var expanded = new Set();
     var pendingDecision = null;
     var previewBusy = false;

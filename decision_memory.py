@@ -7,6 +7,8 @@ Rules (agreed with Daniel, 2026-10-12):
   * An approved item found again goes to the "Approved Before" bucket
     (review_state 'repeat', note 'approved_before') instead of pending, and inherits
     the approved row's review category unless it already has one (2026-10-14).
+  * Only the newest Approved Before copy of an item stays visible; older copies become
+    'superseded' (hidden from tabs, still in whole-scan exports). Nothing is deleted.
   * Decisions also apply to repeats already sitting in the pending queue.
   * "Not set" (and Undo, which uses it) forgets the item and reverses the cascade;
     categories are kept on reversal so nothing you typed is ever wiped.
@@ -22,6 +24,8 @@ from typing import Callable, Iterable
 AUTO_DISPUTED = "auto_disputed"
 APPROVED_BEFORE = "approved_before"
 REPEAT_STATE = "repeat"
+SUPERSEDED_STATE = "superseded"
+_REPEATS = f"('{REPEAT_STATE}', '{SUPERSEDED_STATE}')"
 _DECIDED = ("approved", "rejected")
 _NO_ID = ("", "Unknown")
 # Keep a row's own category; otherwise copy the newest categorised approved copy of the item.
@@ -59,6 +63,17 @@ def move_repeats_to_bucket(conn: sqlite3.Connection) -> None:
     Needs reviews.review_category, so call after review_categories.init_categories."""
     conn.execute(f"update reviews set review_state = '{REPEAT_STATE}', review_category = {_INHERIT_CATEGORY} "
                  f"where review_state = 'pending' and remembered = '{APPROVED_BEFORE}'")
+    supersede_older_repeats(conn)
+
+
+def supersede_older_repeats(conn: sqlite3.Connection, item_ids: list[str] | None = None) -> int:
+    """Keep only the newest Approved Before row per item visible; hide (never delete) the rest."""
+    sql = (f"update reviews set review_state = '{SUPERSEDED_STATE}' where review_state = '{REPEAT_STATE}' "
+           f"and id < (select max(b.id) from reviews b where b.item_id = reviews.item_id "
+           f"and b.review_state = '{REPEAT_STATE}')")
+    if item_ids is None:
+        return conn.execute(sql).rowcount
+    return _in_chunks(conn, sql + " and item_id in ({q})", item_ids)
 
 
 def inherited_category(conn: sqlite3.Connection, item_id: str) -> str:
@@ -125,7 +140,7 @@ def _cascade(conn: sqlite3.Connection, item_ids: list[str], review_state: str) -
     changed += _in_chunks(conn, f"update reviews set review_state = 'pending', remembered = '' "
                                 f"where remembered = '{AUTO_DISPUTED}' and item_id in ({{q}})", item_ids)
     changed += _in_chunks(conn, f"update reviews set review_state = 'pending' "
-                                f"where review_state = '{REPEAT_STATE}' and item_id in ({{q}})", item_ids)
+                                f"where review_state in {_REPEATS} and item_id in ({{q}})", item_ids)
     changed += _in_chunks(conn, f"update reviews set remembered = '' "
                                 f"where remembered = '{APPROVED_BEFORE}' and item_id in ({{q}})", item_ids)
     if review_state == "rejected":
@@ -135,6 +150,7 @@ def _cascade(conn: sqlite3.Connection, item_ids: list[str], review_state: str) -
         changed += _in_chunks(conn, f"update reviews set review_state = '{REPEAT_STATE}', remembered = '{APPROVED_BEFORE}', "
                                     f"review_category = {_INHERIT_CATEGORY} "
                                     f"where review_state = 'pending' and item_id in ({{q}})", item_ids)
+        supersede_older_repeats(conn, item_ids)
     return changed
 
 

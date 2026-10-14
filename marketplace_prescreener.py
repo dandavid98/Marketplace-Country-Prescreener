@@ -36,7 +36,7 @@ import scan_history_page
 from brand_signals import is_generic_brand
 from counterfeit_signals import count_counterfeit_reviews_in_html, count_counterfeit_reviews_across_pages
 from fuzzy_match import DEFAULT_STRICTNESS, SHORT_WORD_MAX, KeywordMatch, allowed_edits, disguised_spellings, keyword_words, legacy_contains, match_keyword
-from ui_shell import STATIC_DIR, render_page
+from ui_shell import STATIC_DIR, count_label, render_page
 
 APP_TITLE = "Marketplace Country Prescreener"
 USER_AGENT = (
@@ -717,6 +717,8 @@ def save_record(record: ListingRecord) -> int:
                 category,
             ),
         )
+        if record.review_state == decision_memory.REPEAT_STATE:
+            decision_memory.supersede_older_repeats(conn, [record.item_id])
         conn.commit()
         return int(cur.lastrowid)
 
@@ -745,6 +747,16 @@ def count_reviews(review_state: str | None = None, country_signal: str | None = 
         return conn.execute(f"select count(*) from reviews{where}", params).fetchone()[0]
 
 
+def state_counts_by_item(country_signal: str | None = None, job_id: str | None = None) -> dict[str, tuple[int, int]]:
+    """{state: (rows, distinct items)}; rows without an item ID count as their own item."""
+    where, params = _review_filters(None, country_signal, job_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        found = {state: (rows, items) for state, rows, items in conn.execute(
+            f"select review_state, count(*), count(distinct case when item_id in ('', 'Unknown') "
+            f"then 'row:' || id else item_id end) from reviews{where} group by review_state", params)}
+    return {state: found.get(state, (0, 0)) for state in REVIEW_STATES}
+
+
 def update_review_state(record_id: int, review_state: str) -> None:
     update_review_states([record_id], review_state)
 
@@ -752,6 +764,8 @@ def update_review_state(record_id: int, review_state: str) -> None:
 STATE_TAB_LABELS = {"pending": "Pending", decision_memory.REPEAT_STATE: "Approved Before", "approved": "Approved",
                     "rejected": "Disputed", "not_queued": "False Positives"}
 REMEMBERED_LABELS = {decision_memory.AUTO_DISPUTED: "Auto-disputed", decision_memory.APPROVED_BEFORE: "Approved before"}
+# Hidden from tabs; only whole-scan exports and scan pages ever show these rows.
+EXPORT_STATE_LABELS = {**STATE_TAB_LABELS, decision_memory.SUPERSEDED_STATE: "Approved Before (older copy)"}
 
 
 REVIEW_STATES = tuple(STATE_TAB_LABELS)
@@ -830,7 +844,7 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
             row.get("price_text", ""),
             row.get("country_signal", ""),
             (row.get("match_kind") or "exact").capitalize(),
-            STATE_TAB_LABELS.get(row.get("review_state"), row.get("review_state", "")),
+            EXPORT_STATE_LABELS.get(row.get("review_state"), row.get("review_state", "")),
             row.get("review_category", ""),
             REMEMBERED_LABELS.get(row.get("remembered") or "", ""),
         ]
@@ -2207,7 +2221,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         if job == "latest" else
         f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=latest">Back to latest scan only</a>'
     )
-    state_counts = {s: count_reviews(s, country_signal, job_id=job_filter) for s in REVIEW_STATES}
+    state_counts = state_counts_by_item(country_signal, job_id=job_filter)
     country_counts = {c: count_reviews(state, c, job_id=job_filter) for c in ["China", "US", "Unknown", "all"]}
 
     def _filter_link(href: str, label: str, is_current: bool) -> str:
@@ -2215,7 +2229,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         return f'<a class="button secondary{current}" href="{href}">{label}</a>'
 
     state_links = "".join(
-        _filter_link(f"/queue?state={s}&country_signal={country_signal}&job={job}", f"{STATE_TAB_LABELS[s]} ({state_counts[s]})", s == state)
+        _filter_link(f"/queue?state={s}&country_signal={country_signal}&job={job}", count_label(STATE_TAB_LABELS[s], *state_counts[s]), s == state)
         for s in state_counts
     )
     country_links = "".join(

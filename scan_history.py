@@ -88,8 +88,9 @@ def list_scans(db_path: Path) -> list[dict]:
                               from reviews group by job_id""").fetchall()
         summaries = {row["job_id"]: dict(row) for row in legacy}
         review_counts = {}
-        for row in conn.execute("select job_id, review_state, count(*) from reviews group by job_id, review_state"):
-            review_counts.setdefault(row[0], {})[row[1]] = row[2]
+        for row in conn.execute("""select job_id, review_state, count(*), count(distinct case when item_id in ('', 'Unknown')
+                                   then 'row:' || id else item_id end) from reviews group by job_id, review_state"""):
+            review_counts.setdefault(row[0], {})[row[1]] = (row[2], row[3])
         jobs = set(saved) | set(summaries)
         # Preserve original term order from the first result of each keyword.
         keywords = {}

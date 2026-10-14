@@ -22,7 +22,7 @@ class ExportTests(unittest.TestCase):
         with sqlite3.connect(db) as conn:
             conn.execute("create table scan_history (job_id text primary key, created_at text, finished_at text, status text, criteria_json text)")
             conn.execute("create table reviews (id integer primary key, job_id text, scan_status text, "
-                         "review_state text, country_signal text, keyword text, title text, listing_url text, negatives text not null default '', review_category text not null default '', created_at text not null default '')")
+                         "review_state text, country_signal text, keyword text, title text, listing_url text, negatives text not null default '', review_category text not null default '', created_at text not null default '', item_id text not null default '')")
             conn.executemany("insert into reviews (id,job_id,scan_status,review_state,country_signal,keyword,title,listing_url,negatives) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
                 (1, "scan-a", "match", "pending", "China", "pending", "item-1", "url-1", "tool, refill"),
                 (2, "scan-a", "match", "approved", "China", "approved", "item-2", "url-2", "tool, refill"),

@@ -85,9 +85,9 @@ class ScanHistoryTests(unittest.TestCase):
                               country_signal, evidence) values ('scan-x', 'Tide', '', 'US', 'China', 'match', ?,
                               '2026-01-01T00:00:00+00:00', '', '', '', '', '', 'China', '')""", (state,))
         entry = scan_history.list_scans(app.DB_PATH)[0]
-        self.assertEqual(entry["review_counts"], {"approved": 2, "rejected": 1, "pending": 1})
+        self.assertEqual(entry["review_counts"], {"approved": (2, 2), "rejected": (1, 1), "pending": (1, 1)})
         page = app.history_page().body.decode()
-        for text in ("Approved: 2", "Disputed: 1", "Pending: 1", "False Positives: 0",
+        for text in ("Approved (2)", "Disputed (1)", "Pending (1)", "False Positives (0)",
                      "/queue?job=scan-x&amp;state=rejected&amp;country_signal=all"):
             with self.subTest(text=text):
                 self.assertIn(text, page)

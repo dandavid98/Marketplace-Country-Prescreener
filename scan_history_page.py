@@ -8,6 +8,7 @@ from urllib.parse import quote
 from fastapi.responses import HTMLResponse
 
 import scan_history
+from ui_shell import count_label
 
 
 LABELS = {
@@ -47,7 +48,7 @@ def _review_counts(job_id: str, counts: dict, state_labels: dict) -> str:
     """One link per review state, so each count opens exactly those rows."""
     links = "".join(
         f'<a class="pill" href="/queue?job={quote(job_id)}&amp;state={state}&amp;country_signal=all">'
-        f'{escape(label)}: {counts.get(state, 0):,}</a>'
+        f'{escape(count_label(label, *counts.get(state, (0, 0))))}</a>'
         for state, label in state_labels.items()
     )
     return f'<div class="summary" aria-label="Review decisions">{links}</div>'

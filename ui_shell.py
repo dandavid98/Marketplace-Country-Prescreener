@@ -38,6 +38,11 @@ def icon(name: str, extra_class: str = "") -> str:
     return f'<svg class="{cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">{_ICONS[name]}</svg>'
 
 
+def count_label(label: str, rows: int, items: int) -> str:
+    """'Approved (519 items · 1,106 rows)'; a plain count when every row is a different item."""
+    return f"{label} ({rows:,})" if rows == items else f"{label} ({items:,} items · {rows:,} rows)"
+
+
 def _asset_version(name: str) -> str:
     """Cache-buster so browsers pick up static edits without a hard refresh."""
     try:

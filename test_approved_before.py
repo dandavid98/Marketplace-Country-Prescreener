@@ -51,11 +51,40 @@ class ApprovedBeforeTests(unittest.TestCase):
 
     def test_approving_cascades_existing_pending_copies_but_keeps_their_own_category(self):
         self.add(1, "111", category=CAT)
-        self.add(2, "111", job="scan-b")
-        self.add(3, "111", job="scan-c", category=OTHER)
+        self.add(2, "222", job="scan-b")
+        self.add(3, "111", job="scan-b")
+        self.add(4, "222", job="scan-c", category=OTHER)
+        app.update_review_states([1, 2], "approved")
+        self.assertEqual(self.row(3), ("repeat", CAT, "approved_before"))
+        self.assertEqual(self.row(4), ("repeat", OTHER, "approved_before"))   # never overwritten
+
+    def test_only_newest_repeat_per_item_stays_visible_older_copies_hidden_not_deleted(self):
+        self.add(1, "111", category=CAT)
+        for rid, job in ((2, "scan-b"), (3, "scan-c"), (4, "scan-d")):
+            self.add(rid, "111", job=job)
         app.update_review_states([1], "approved")
-        self.assertEqual(self.row(2), ("repeat", CAT, "approved_before"))
-        self.assertEqual(self.row(3), ("repeat", OTHER, "approved_before"))   # never overwritten
+        self.assertEqual([self.row(r)[0] for r in (2, 3, 4)], ["superseded", "superseded", "repeat"])
+        newer = app.save_record(self.record("111"))         # a later scan finds it again
+        self.assertEqual(self.row(newer)[0], "repeat")
+        self.assertEqual(self.row(4)[0], "superseded")
+        self.assertEqual(app.count_reviews("repeat"), 1)
+        self.assertEqual(app.count_reviews(), 5)               # 4 seeded + 1 new: nothing deleted
+        path = app.export_reviews_xlsx(job_id="scan-b")         # whole-scan export still has it
+        self.addCleanup(path.unlink, missing_ok=True)
+        from openpyxl import load_workbook
+        sheet = list(load_workbook(path, read_only=True).active.values)
+        self.assertEqual(sheet[1][sheet[0].index("Review Status")], "Approved Before (older copy)")
+        app.update_review_states([1], "pending")                # Not set brings every copy back
+        self.assertEqual({self.row(r)[0] for r in (2, 3, 4, newer)}, {"pending"})
+
+    def test_tabs_and_history_show_items_and_rows_when_they_differ(self):
+        for rid, item in ((1, "111"), (2, "111"), (3, "222")):
+            self.add(rid, item, state="approved", job=f"scan-{rid}")
+        page = app.queue_page(state="approved", country_signal="all", job="all").body.decode()
+        self.assertIn("Approved (2 items · 3 rows)", page)
+        self.assertIn("Pending (0)", page)
+        self.assertEqual(app.count_label("X", 5, 5), "X (5)")
+        self.assertEqual(app.count_label("X", 1378, 207), "X (207 items · 1,378 rows)")
 
     def test_not_set_returns_repeats_to_pending_and_dispute_auto_disputes_them(self):
         self.add(1, "111", category=CAT)
@@ -95,7 +124,7 @@ class ApprovedBeforeTests(unittest.TestCase):
         app.update_review_states([1], "approved")
         page = app.queue_page(state="repeat", country_signal="all", job="all").body.decode()
         self.assertIn("Approved Before (1)", page)
-        self.assertIn("Approved Before: 1", app.history_page().body.decode())
+        self.assertIn("Approved Before (1)", app.history_page().body.decode())
         self.assertEqual(decision_memory.REPEAT_STATE, "repeat")
 
 
