@@ -13,7 +13,7 @@
 
   var LABELS = { approve: 'Approved', reject: 'Disputed', unset: 'Set back to pending' };
   var STATE_FOR = { approve: 'approved', reject: 'rejected', unset: 'pending' };
-  var REVIEW_LABELS = { approved: 'Approved', rejected: 'Disputed', pending: 'Pending', not_queued: 'False Positives' };
+  var REVIEW_LABELS = { approved: 'Approved', rejected: 'Disputed', pending: 'Pending', repeat: 'Approved Before', not_queued: 'False Positives' };
   // decision memory (decision_memory.py): why a row got its state without you clicking it
   var REMEMBERED = {
     auto_disputed: { label: 'auto', title: 'Auto-disputed: you disputed this item ID before, so it skipped the pending queue.' },

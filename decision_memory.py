@@ -4,9 +4,12 @@ Rules (agreed with Daniel, 2026-10-12):
   * Same listing = same item ID, whoever sells it.
   * A disputed item found again by a scan is saved as disputed ("auto-disputed"),
     so it never reaches the pending queue. It stays visible in the Disputed tab.
-  * An approved item found again stays pending, with an "approved before" note.
+  * An approved item found again goes to the "Approved Before" bucket
+    (review_state 'repeat', note 'approved_before') instead of pending, and inherits
+    the approved row's review category unless it already has one (2026-10-14).
   * Decisions also apply to repeats already sitting in the pending queue.
-  * "Not set" (and Undo, which uses it) forgets the item and reverses the cascade.
+  * "Not set" (and Undo, which uses it) forgets the item and reverses the cascade;
+    categories are kept on reversal so nothing you typed is ever wiped.
 
 `reviews.remembered` holds the note: '' | 'auto_disputed' | 'approved_before'.
 Rows with no usable item ID are never remembered or matched.
@@ -18,8 +21,13 @@ from typing import Callable, Iterable
 
 AUTO_DISPUTED = "auto_disputed"
 APPROVED_BEFORE = "approved_before"
+REPEAT_STATE = "repeat"
 _DECIDED = ("approved", "rejected")
 _NO_ID = ("", "Unknown")
+# Keep a row's own category; otherwise copy the newest categorised approved copy of the item.
+_INHERIT_CATEGORY = ("coalesce(nullif(review_category, ''), (select a.review_category from reviews a "
+                     "where a.item_id = reviews.item_id and a.review_state = 'approved' "
+                     "and a.review_category <> '' order by a.id desc limit 1), '')")
 
 
 def init_memory(conn: sqlite3.Connection, parse_item_id: Callable[[str], str]) -> None:
@@ -46,6 +54,19 @@ def init_memory(conn: sqlite3.Connection, parse_item_id: Callable[[str], str]) -
         conn.executemany("update reviews set item_id = ? where id = ?", fixes)
 
 
+def move_repeats_to_bucket(conn: sqlite3.Connection) -> None:
+    """Move repeats saved before the Approved Before bucket existed. Idempotent.
+    Needs reviews.review_category, so call after review_categories.init_categories."""
+    conn.execute(f"update reviews set review_state = '{REPEAT_STATE}', review_category = {_INHERIT_CATEGORY} "
+                 f"where review_state = 'pending' and remembered = '{APPROVED_BEFORE}'")
+
+
+def inherited_category(conn: sqlite3.Connection, item_id: str) -> str:
+    row = conn.execute("select review_category from reviews where item_id = ? and review_state = 'approved' "
+                       "and review_category <> '' order by id desc limit 1", (item_id,)).fetchone()
+    return row[0] if row else ""
+
+
 def remembered_decision(conn: sqlite3.Connection, item_id: str) -> str | None:
     """'approved' / 'rejected' if this item was decided before, else None."""
     if item_id in _NO_ID:
@@ -54,16 +75,17 @@ def remembered_decision(conn: sqlite3.Connection, item_id: str) -> str | None:
     return row[0] if row else None
 
 
-def apply_to_new_row(conn: sqlite3.Connection, item_id: str, review_state: str, evidence: str) -> tuple[str, str, str]:
-    """For a row a scan is about to queue: returns (review_state, remembered, evidence)."""
+def apply_to_new_row(conn: sqlite3.Connection, item_id: str, review_state: str,
+                     evidence: str) -> tuple[str, str, str, str]:
+    """For a row a scan is about to queue: returns (review_state, remembered, evidence, category)."""
     if review_state != "pending":
-        return review_state, "", evidence
+        return review_state, "", evidence, ""
     decision = remembered_decision(conn, item_id)
     if decision == "rejected":
-        return "rejected", AUTO_DISPUTED, "Auto-disputed: you disputed this item before. " + evidence
+        return "rejected", AUTO_DISPUTED, "Auto-disputed: you disputed this item before. " + evidence, ""
     if decision == "approved":
-        return "pending", APPROVED_BEFORE, evidence
-    return review_state, "", evidence
+        return REPEAT_STATE, APPROVED_BEFORE, evidence, inherited_category(conn, item_id)
+    return review_state, "", evidence, ""
 
 
 def record_decisions(conn: sqlite3.Connection, record_ids: Iterable[int], review_state: str, now: str) -> int:
@@ -102,13 +124,16 @@ def _cascade(conn: sqlite3.Connection, item_ids: list[str], review_state: str) -
     # always undo the previous cascade first, so switching a decision never leaves stale marks
     changed += _in_chunks(conn, f"update reviews set review_state = 'pending', remembered = '' "
                                 f"where remembered = '{AUTO_DISPUTED}' and item_id in ({{q}})", item_ids)
+    changed += _in_chunks(conn, f"update reviews set review_state = 'pending' "
+                                f"where review_state = '{REPEAT_STATE}' and item_id in ({{q}})", item_ids)
     changed += _in_chunks(conn, f"update reviews set remembered = '' "
                                 f"where remembered = '{APPROVED_BEFORE}' and item_id in ({{q}})", item_ids)
     if review_state == "rejected":
         changed += _in_chunks(conn, f"update reviews set review_state = 'rejected', remembered = '{AUTO_DISPUTED}', review_category = '' "
                                     f"where review_state = 'pending' and item_id in ({{q}})", item_ids)
     elif review_state == "approved":
-        changed += _in_chunks(conn, f"update reviews set remembered = '{APPROVED_BEFORE}' "
+        changed += _in_chunks(conn, f"update reviews set review_state = '{REPEAT_STATE}', remembered = '{APPROVED_BEFORE}', "
+                                    f"review_category = {_INHERIT_CATEGORY} "
                                     f"where review_state = 'pending' and item_id in ({{q}})", item_ids)
     return changed
 

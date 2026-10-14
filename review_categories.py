@@ -46,7 +46,7 @@ def assign(db_path: Path, ids: list[int], category: str, job_id: str | None = No
         for offset in range(0, len(unique), 500):
             part = unique[offset:offset + 500]
             q = ",".join("?" for _ in part)
-            where = f"id in ({q}) and review_state in ('pending', 'approved', 'not_queued')"
+            where = f"id in ({q}) and review_state in ('pending', 'repeat', 'approved', 'not_queued')"
             params = list(part)
             if job_id:
                 where += " and job_id = ?"

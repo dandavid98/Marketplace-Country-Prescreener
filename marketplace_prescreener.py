@@ -664,6 +664,7 @@ def init_db() -> None:
         )
         decision_memory.init_memory(conn, extract_item_id)
         review_categories.init_categories(conn)
+        decision_memory.move_repeats_to_bucket(conn)
         conn.commit()
     scan_history.init_history(DB_PATH)
 
@@ -673,16 +674,16 @@ init_db()
 
 def save_record(record: ListingRecord) -> int:
     with sqlite3.connect(DB_PATH) as conn:
-        # previously disputed items go straight to Disputed; approved ones get a note
-        record.review_state, record.remembered, record.evidence = decision_memory.apply_to_new_row(
+        # previously disputed items go straight to Disputed; approved ones to Approved Before
+        record.review_state, record.remembered, record.evidence, category = decision_memory.apply_to_new_row(
             conn, record.item_id, record.review_state, record.evidence)
         cur = conn.execute(
             """
             insert into reviews (
                 job_id, keyword, search_url, listing_url, seller_page_url, title, seller_name, seller_id,
                 ship_from_country, target_country, country_signal, evidence_source, evidence,
-                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind, remembered, negatives
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                scan_status, review_state, created_at, item_id, image_url, price_text, price_value, description, counterfeit_review_count, market, listing_brand, counterfeit_checked, match_kind, remembered, negatives, review_category
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.job_id,
@@ -713,6 +714,7 @@ def save_record(record: ListingRecord) -> int:
                 record.match_kind,
                 record.remembered,
                 record.negatives,
+                category,
             ),
         )
         conn.commit()
@@ -747,11 +749,12 @@ def update_review_state(record_id: int, review_state: str) -> None:
     update_review_states([record_id], review_state)
 
 
-STATE_TAB_LABELS = {"pending": "Pending", "approved": "Approved", "rejected": "Disputed", "not_queued": "False Positives"}
+STATE_TAB_LABELS = {"pending": "Pending", decision_memory.REPEAT_STATE: "Approved Before", "approved": "Approved",
+                    "rejected": "Disputed", "not_queued": "False Positives"}
 REMEMBERED_LABELS = {decision_memory.AUTO_DISPUTED: "Auto-disputed", decision_memory.APPROVED_BEFORE: "Approved before"}
 
 
-REVIEW_STATES = ("pending", "approved", "rejected", "not_queued")
+REVIEW_STATES = tuple(STATE_TAB_LABELS)
 
 
 def update_review_states(record_ids: list[int], review_state: str) -> tuple[int, int]:
@@ -778,11 +781,8 @@ def update_review_states(record_ids: list[int], review_state: str) -> tuple[int,
     return changed, cascaded
 
 
-EXPORT_SCOPES = {
-    "all": "Whole scan", "match": "Confirmed matches", "approved": "Approved",
-    "pending": "Pending", "rejected": "Disputed", "not_queued": "False Positives",
-}
-ExportScope = Literal["all", "match", "approved", "pending", "rejected", "not_queued"]
+EXPORT_SCOPES = {"all": "Whole scan", "match": "Confirmed matches", **STATE_TAB_LABELS}
+ExportScope = Literal["all", "match", "approved", "pending", "repeat", "rejected", "not_queued"]
 
 
 def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
@@ -2207,7 +2207,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
         if job == "latest" else
         f'<a class="button secondary" href="/queue?state={state}&country_signal={country_signal}&job=latest">Back to latest scan only</a>'
     )
-    state_counts = {s: count_reviews(s, country_signal, job_id=job_filter) for s in ["pending", "approved", "rejected", "not_queued"]}
+    state_counts = {s: count_reviews(s, country_signal, job_id=job_filter) for s in REVIEW_STATES}
     country_counts = {c: count_reviews(state, c, job_id=job_filter) for c in ["China", "US", "Unknown", "all"]}
 
     def _filter_link(href: str, label: str, is_current: bool) -> str:
@@ -2244,7 +2244,7 @@ def queue_page(state: str = Query(default="pending"), country_signal: str = Quer
       {country_links}
     </div>
     <p class="tiny" style="margin-top:12px;">Click a column name to sort. Use the boxes under the headers to filter. Hover a status badge to see its evidence.
-      Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items come back marked "approved before". <strong>Not set</strong> forgets the decision.</p>
+      Decisions are remembered by item ID: dispute an item once and every repeat of it (now and in future scans) is auto-disputed; approved items found again skip Pending and land in <strong>Approved Before</strong>, carrying over their category. <strong>Not set</strong> forgets the decision.</p>
     <div class="fr-panel">
       <div class="fr-triage" aria-label="Review triage">
         <label for="fr-lanes">Triage filter</label><select id="fr-lanes" aria-label="Triage filter"></select>

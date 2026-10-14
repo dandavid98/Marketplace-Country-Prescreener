@@ -59,7 +59,7 @@ def preview(db_path: Path, ids: list[int], action: str, scope: str | None) -> di
                 f"select id, item_id, review_state, remembered from reviews "
                 f"where item_id in ({','.join('?' * len(chunk))})", chunk))
         selected = set(ids)
-        pending_repeats = sum(r["id"] not in selected and r["review_state"] == "pending"
+        pending_repeats = sum(r["id"] not in selected and r["review_state"] in ("pending", "repeat")
                               for r in affected)
         remembered_repeats = sum(r["id"] not in selected and r["remembered"] in
                                  ("auto_disputed", "approved_before") for r in affected)
