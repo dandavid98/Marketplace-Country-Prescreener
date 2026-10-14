@@ -2176,7 +2176,7 @@ def export_controls(job: str, state: str = "all") -> str:
 
 @app.get("/history", response_class=HTMLResponse)
 def history_page() -> HTMLResponse:
-    return scan_history_page.render_history(DB_PATH, html_page)
+    return scan_history_page.render_history(DB_PATH, html_page, STATE_TAB_LABELS)
 
 
 @app.get("/queue", response_class=HTMLResponse)

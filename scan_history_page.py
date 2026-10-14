@@ -43,7 +43,17 @@ def _date(value: str) -> str:
         return value
 
 
-def render_history(db_path, html_page) -> HTMLResponse:
+def _review_counts(job_id: str, counts: dict, state_labels: dict) -> str:
+    """One link per review state, so each count opens exactly those rows."""
+    links = "".join(
+        f'<a class="pill" href="/queue?job={quote(job_id)}&amp;state={state}&amp;country_signal=all">'
+        f'{escape(label)}: {counts.get(state, 0):,}</a>'
+        for state, label in state_labels.items()
+    )
+    return f'<div class="summary" aria-label="Review decisions">{links}</div>'
+
+
+def render_history(db_path, html_page, state_labels: dict) -> HTMLResponse:
     scans = scan_history.list_scans(db_path)
     cards = []
     for scan in scans:
@@ -67,6 +77,7 @@ def render_history(db_path, html_page) -> HTMLResponse:
             <span class="tiny"> · {escape(status)}</span></div>
             <a class="button secondary" href="/queue?job={quote(scan["job_id"])}&amp;country_signal=all">View results</a></div>
           <p class="tiny">{scan["row_count"]:,} saved rows · {scan["matches"]:,} confirmed matches · Scan {job_id}</p>
+          {_review_counts(scan["job_id"], scan["review_counts"], state_labels)}
           <dl class="history-fields">
             <div><dt>Keywords</dt><dd>{escape(", ".join(keywords) if keywords else "None")}</dd></div>
             <div><dt>Negatives</dt><dd>{escape(negatives_text)}</dd></div>

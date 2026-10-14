@@ -79,6 +79,9 @@ def list_scans(db_path: Path) -> list[dict]:
                                      min(target_country) as country, max(target_country) as last_country
                               from reviews group by job_id""").fetchall()
         summaries = {row["job_id"]: dict(row) for row in legacy}
+        review_counts = {}
+        for row in conn.execute("select job_id, review_state, count(*) from reviews group by job_id, review_state"):
+            review_counts.setdefault(row[0], {})[row[1]] = row[2]
         jobs = set(saved) | set(summaries)
         # Preserve original term order from the first result of each keyword.
         keywords = {}
@@ -103,6 +106,7 @@ def list_scans(db_path: Path) -> list[dict]:
             "job_id": job_id, "created_at": stored["created_at"] if stored else summary["created_at"],
             "status": stored["status"] if stored else None,
             "row_count": summary.get("row_count", 0), "matches": summary.get("matches", 0),
+            "review_counts": review_counts.get(job_id, {}),
             "criteria": criteria, "complete": bool(stored),
         })
     return sorted(result, key=lambda entry: entry["created_at"], reverse=True)

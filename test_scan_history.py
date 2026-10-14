@@ -77,6 +77,21 @@ class ScanHistoryTests(unittest.TestCase):
         self.assertIn("Not recorded for this older scan", page)
         self.assertNotIn("Generic brands only", page)
 
+    def test_history_counts_review_decisions_per_scan(self):
+        with sqlite3.connect(app.DB_PATH) as conn:
+            for state in ("approved", "approved", "rejected", "pending"):
+                conn.execute("""insert into reviews (job_id, keyword, negatives, market, target_country, scan_status, review_state, created_at,
+                              search_url, listing_url, title, seller_name, ship_from_country,
+                              country_signal, evidence) values ('scan-x', 'Tide', '', 'US', 'China', 'match', ?,
+                              '2026-01-01T00:00:00+00:00', '', '', '', '', '', 'China', '')""", (state,))
+        entry = scan_history.list_scans(app.DB_PATH)[0]
+        self.assertEqual(entry["review_counts"], {"approved": 2, "rejected": 1, "pending": 1})
+        page = app.history_page().body.decode()
+        for text in ("Approved: 2", "Disputed: 1", "Pending: 1", "False Positives: 0",
+                     "/queue?job=scan-x&amp;state=rejected&amp;country_signal=all"):
+            with self.subTest(text=text):
+                self.assertIn(text, page)
+
     def test_html_escapes_persisted_keywords(self):
         job_id = app.create_job(["<script>"], "China", 1, 1, "balanced")
         self.addCleanup(app.JOBS.pop, job_id)
