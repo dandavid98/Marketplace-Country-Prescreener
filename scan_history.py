@@ -68,6 +68,14 @@ def scan_summary(db_path: Path, job_id: str) -> dict | None:
             "rows": counts["rows"], "matches": counts["matches"] or 0}
 
 
+def scan_dates(db_path: Path, job_ids: set[str]) -> dict[str, str]:
+    """Start timestamp per scan; legacy scans fall back to their first saved row."""
+    with sqlite3.connect(db_path) as conn:
+        dates = dict(conn.execute("select job_id, min(created_at) from reviews group by job_id"))
+        dates.update(conn.execute("select job_id, created_at from scan_history"))
+    return {job_id: dates[job_id] for job_id in job_ids if job_id in dates}
+
+
 def list_scans(db_path: Path) -> list[dict]:
     """Include legacy result-only jobs; don't infer missing toggles from their rows."""
     with sqlite3.connect(db_path) as conn:

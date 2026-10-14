@@ -53,7 +53,23 @@ def _review_counts(job_id: str, counts: dict, state_labels: dict) -> str:
     return f'<div class="summary" aria-label="Review decisions">{links}</div>'
 
 
-def render_history(db_path, html_page, state_labels: dict) -> HTMLResponse:
+def _export_bar(choice_fields: str) -> str:
+    """Multi-scan export: dates tick matching scans, checkboxes refine, one XLSX out."""
+    return f'''<form id="multi-export" class="card inset multi-export" action="/export-scans.xlsx" method="get">
+      <strong>Export several scans into one XLSX</strong>
+      <p class="tiny">Pick a date range to tick every scan started in it, or tick scans by hand below. Rows get Scan ID and Scan Date columns.</p>
+      <div class="export-controls">
+        <label for="range-from">From</label><input type="date" id="range-from">
+        <label for="range-to">To</label><input type="date" id="range-to">
+        <button type="button" class="button secondary" id="range-clear">Clear ticks</button>
+      </div>
+      <div class="export-controls">{choice_fields}
+        <button type="submit" class="button" id="multi-export-submit" disabled>Download XLSX (0 scans)</button>
+        <span class="tiny" id="multi-export-status" aria-live="polite"></span>
+      </div></form>'''
+
+
+def render_history(db_path, html_page, state_labels: dict, export_choice_fields: str) -> HTMLResponse:
     scans = scan_history.list_scans(db_path)
     cards = []
     for scan in scans:
@@ -73,8 +89,10 @@ def render_history(db_path, html_page, state_labels: dict) -> HTMLResponse:
             fields += '<div><dt>Other toggles / settings</dt><dd>Not recorded for this older scan</dd></div>'
         status = scan["status"] or "Results saved; scan status not recorded"
         cards.append(f'''<article class="history-entry">
-          <div class="history-heading"><div><strong>{escape(_date(scan["created_at"]))}</strong>
-            <span class="tiny"> · {escape(status)}</span></div>
+          <div class="history-heading"><label class="history-pick"><input type="checkbox" name="jobs" value="{job_id}" form="multi-export"
+              data-date="{escape(scan["created_at"][:10], quote=True)}" aria-label="Include scan {job_id} in multi-scan export">
+            <strong>{escape(_date(scan["created_at"]))}</strong>
+            <span class="tiny"> · {escape(status)}</span></label>
             <a class="button secondary" href="/queue?job={quote(scan["job_id"])}&amp;country_signal=all">View results</a></div>
           <p class="tiny">{scan["row_count"]:,} saved rows · {scan["matches"]:,} confirmed matches · Scan {job_id}</p>
           {_review_counts(scan["job_id"], scan["review_counts"], state_labels)}
@@ -84,7 +102,8 @@ def render_history(db_path, html_page, state_labels: dict) -> HTMLResponse:
             {fields}
           </dl></article>''')
     content = "".join(cards) or '<p>No scans recorded yet. Start a scan to see its criteria here.</p>'
-    body = f'''<div class="card"><p class="tiny">Newest first · {len(scans)} scan(s). Earlier scans show only settings preserved with their results; "Not recorded" does not mean a toggle was off.</p>
+    body = f'''<div class="card">{_export_bar(export_choice_fields) if scans else ""}
+      <p class="tiny">Newest first · {len(scans)} scan(s). Earlier scans show only settings preserved with their results; "Not recorded" does not mean a toggle was off.</p>
       <div class="history-list">{content}</div></div>'''
-    return html_page("Scan history", body, active="history",
+    return html_page("Scan history", body, active="history", scripts=("history_export.js",),
                      subtitle="Search criteria used for past scans, including keywords, negatives and matching options.")

@@ -164,6 +164,35 @@ class ExportTests(unittest.TestCase):
         self.assertIn('<option value="">All categories</option>', page)
         self.assertIn('IP Rights Infringement Utility Outdoor &amp; Maintenence', page)
 
+    def test_multi_scan_export_merges_ticked_scans_with_traceable_columns(self):
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.executemany("insert into scan_history values (?, ?, null, 'done', '{}')",
+                             [("scan-a", "2026-10-01T09:00:00+00:00"), ("scan-b", "2026-10-05T09:00:00+00:00")])
+            conn.execute("insert into reviews (id,job_id,scan_status,review_state,country_signal,keyword,title,listing_url) "
+                         "values (6, 'scan-c', 'match', 'approved', 'China', 'not ticked', 'item-6', 'url-6')")
+        response = app.export_scans_xlsx(jobs=["scan-a", "scan-b"], scope="approved", category="")
+        self.addCleanup(response.path.unlink, missing_ok=True)
+        sheet = list(load_workbook(response.path, read_only=True).active.values)
+        header, rows = sheet[0], sheet[1:]
+        self.assertEqual(header[-2:], ("Scan ID", "Scan Date"))
+        self.assertEqual(sorted((r[0], r[-2], r[-1]) for r in rows),
+                         [("approved", "scan-a", "2026-10-01"), ("other scan", "scan-b", "2026-10-05")])
+        self.assertEqual(response.filename, "prescreener_2_scans_approved.xlsx")
+        self.assertNotIn("Scan ID", list(load_workbook(app.export_reviews_xlsx("scan-a"), read_only=True).active.values)[0])
+        self.assertEqual(app.export_scans_xlsx(jobs=[], scope="all", category="").status_code, 400)
+        self.assertEqual(app.export_scans_xlsx(jobs=["scan-a"], scope="all", category="Nope").status_code, 400)
+
+    def test_history_page_offers_multi_scan_export(self):
+        with sqlite3.connect(app.DB_PATH) as conn:
+            conn.execute("alter table reviews add column market text")
+            conn.execute("alter table reviews add column target_country text")
+        page = app.history_page().body.decode()
+        for text in ('action="/export-scans.xlsx"', 'type="date" id="range-from"',
+                     'name="jobs" value="scan-a" form="multi-export"', 'id="export-category" name="category"',
+                     'history_export.js'):
+            with self.subTest(text=text):
+                self.assertIn(text, page)
+
 
 if __name__ == "__main__":
     unittest.main()

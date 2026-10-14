@@ -450,6 +450,11 @@ th[aria-sort="ascending"] .sort-arrow, th[aria-sort="descending"] .sort-arrow { 
 .history-fields > div { min-width: 0; }
 .history-fields dt { color: var(--muted-foreground); font-size: 12px; font-weight: 600; }
 .history-fields dd { margin: 4px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.history-pick { display: flex; align-items: center; gap: 8px; margin: 0; cursor: pointer; font-weight: 400; }
+.history-pick input { width: 20px; height: 20px; margin: 0; flex: none; }
+.multi-export { display: grid; gap: 8px; margin: 0 0 12px; }
+.multi-export p { margin: 0; }
+.export-controls input[type="date"] { width: auto; }
 .top-actions { margin-bottom: 10px; align-items: center; }
 .export-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; }
 .export-controls select { width: auto; max-width: 100%; }

@@ -786,10 +786,18 @@ ExportScope = Literal["all", "match", "approved", "pending", "rejected", "not_qu
 
 
 def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
-                        selected_ids: set[int] | None = None, category: str = "") -> Path:
+                        selected_ids: set[int] | None = None, category: str = "",
+                        job_ids: list[str] | None = None) -> Path:
+    """job_ids merges several scans into one sheet and adds Scan ID / Scan Date columns
+    so every row stays traceable; single-scan exports keep their existing columns."""
     if category and category not in review_categories.CATEGORIES:
         raise ValueError("Unknown review category")
-    rows = get_reviews("all", job_id=job_id)
+    if job_ids:
+        wanted = set(job_ids)
+        rows = [row for row in get_reviews("all") if row["job_id"] in wanted]
+        scan_dates = scan_history.scan_dates(DB_PATH, wanted)
+    else:
+        rows = get_reviews("all", job_id=job_id)
     if scope == "match":
         rows = [row for row in rows if row["scan_status"] == "match"]
     elif scope != "all":
@@ -806,6 +814,8 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
     headers = ["Keyword", "Negatives", "Listing Brand", "Market", "Title", "Walmart URL", "Seller", "Seller ID", "Price", "Country", "Matched As", "Review Status", "Review Category", "Remembered"]
     if any_counterfeit_checked:
         headers.append("# of Counterfeit Reviews")
+    if job_ids:
+        headers += ["Scan ID", "Scan Date"]
     ws.append(headers)
     for row in rows:
         values = [
@@ -827,6 +837,8 @@ def export_reviews_xlsx(job_id: str | None = None, scope: ExportScope = "all",
         if any_counterfeit_checked:
             checked = row.get("counterfeit_checked")
             values.append(row.get("counterfeit_review_count", 0) if checked else "")
+        if job_ids:
+            values += [row["job_id"], scan_dates.get(row["job_id"], "")[:10]]
         ws.append(values)
     for cell in ws[1]:
         cell.font = cell.font.copy(bold=True)
@@ -2154,7 +2166,8 @@ def api_review_category(ids: list[int] = Body(...), category: str = Body(...),
     return JSONResponse({"updated": updated, "category": category})
 
 
-def export_controls(job: str, state: str = "all") -> str:
+def export_choice_fields(state: str = "all") -> str:
+    """Status + category dropdowns shared by the queue and multi-scan exports."""
     options = "".join(
         f'<option value="{key}"{" selected" if key == state else ""}>{label}</option>'
         for key, label in EXPORT_SCOPES.items()
@@ -2163,12 +2176,16 @@ def export_controls(job: str, state: str = "all") -> str:
         f'<option value="{html_escape(name, quote=True)}">{html_escape(name)}</option>'
         for name in review_categories.CATEGORIES
     )
-    return (f'<form action="/export.xlsx" method="get" class="export-controls">'
-            f'<input type="hidden" name="job" value="{html_escape(job, quote=True)}">'
-            f'<label for="export-scope">Export</label>'
+    return (f'<label for="export-scope">Export</label>'
             f'<select id="export-scope" name="scope">{options}</select>'
             f'<label for="export-category">Category</label>'
-            f'<select id="export-category" name="category"><option value="">All categories</option>{category_options}</select>'
+            f'<select id="export-category" name="category"><option value="">All categories</option>{category_options}</select>')
+
+
+def export_controls(job: str, state: str = "all") -> str:
+    return (f'<form action="/export.xlsx" method="get" class="export-controls">'
+            f'<input type="hidden" name="job" value="{html_escape(job, quote=True)}">'
+            f'{export_choice_fields(state)}'
             f'<button type="submit" class="button secondary">Download XLSX</button>'
             f'<button type="button" id="export-selected" class="button secondary" disabled>Export selected (0)</button>'
             f'</form>')
@@ -2176,7 +2193,7 @@ def export_controls(job: str, state: str = "all") -> str:
 
 @app.get("/history", response_class=HTMLResponse)
 def history_page() -> HTMLResponse:
-    return scan_history_page.render_history(DB_PATH, html_page, STATE_TAB_LABELS)
+    return scan_history_page.render_history(DB_PATH, html_page, STATE_TAB_LABELS, export_choice_fields())
 
 
 @app.get("/queue", response_class=HTMLResponse)
@@ -2319,7 +2336,19 @@ def export_selected_xlsx(ids: list[int] = Body(...), job: str = Query(default="l
     return _xlsx_response(path, scope)
 
 
-def _xlsx_response(path: Path, scope: ExportScope) -> FileResponse:
+@app.get("/export-scans.xlsx")
+def export_scans_xlsx(jobs: list[str] = Query(default=[]), scope: ExportScope = Query(default="all"),
+                      category: str = Query(default="")) -> FileResponse:
+    """One workbook from the scans ticked on the Scan history page."""
+    if not jobs:
+        return JSONResponse({"error": "Tick at least one scan to export"}, status_code=400)
+    if category and category not in review_categories.CATEGORIES:
+        return JSONResponse({"error": "Unknown review category"}, status_code=400)
+    path = export_reviews_xlsx(scope=scope, category=category, job_ids=jobs)
+    return _xlsx_response(path, f"{len(set(jobs))}_scans_{scope}")
+
+
+def _xlsx_response(path: Path, scope: str) -> FileResponse:
     return FileResponse(
         path,
         filename=f"prescreener_{scope}.xlsx",
