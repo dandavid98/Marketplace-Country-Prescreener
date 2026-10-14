@@ -93,7 +93,6 @@
       BASE_COLUMNS.slice(counterfeitIndex), opts.extraColumns || []);
     var pageSize = opts.pageSize || 100;
     var moreChoices = opts.showMoreChoices || null;
-    var pagination = opts.paginationTarget || table.tFoot;
     var state = { rows: [], sortKey: null, sortDir: 'none', filters: {}, limit: pageSize, optionSigs: {} };
     var byKey = {};
     columns.forEach(function (c) { byKey[c.key] = c; });
@@ -134,6 +133,9 @@
       }).join('') + '</tr></thead><tbody></tbody><tfoot></tfoot>';
 
     var tbody = table.tBodies[0], tfoot = table.tFoot;
+    // Resolved only after innerHTML exists: grabbing table.tFoot earlier gave null on
+    // empty tables (Live scan page) and crashed the page before polling started.
+    var pagination = opts.paginationTarget || tfoot;
     // put restored text filters back in their boxes (selects are restored once options exist)
     table.tHead.querySelectorAll('input[data-filter]').forEach(function (inp) {
       inp.value = state.filters[inp.dataset.filter] || '';
